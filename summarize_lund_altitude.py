@@ -33,6 +33,17 @@ class MetricsAccumulator:
     tiles_used: int = 0
 
 
+@dataclass
+class TileMetrics:
+    elevation_values: np.ndarray
+    local_min: float
+    local_max: float
+    min_coord_3006: tuple[float, float]
+    max_coord_3006: tuple[float, float]
+    slope_sum_squares: float
+    slope_count: int
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compute min and max altitude for a tatort from downloaded DEM tiles."
@@ -104,6 +115,62 @@ def format_coord(coord: tuple[float, float] | None) -> str:
     return f"({lat:.6f}, {lon:.6f})"
 
 
+def compute_tile_metrics(tif_path: Path, geometry) -> TileMetrics | None:
+    with rasterio.open(tif_path) as dataset:
+        try:
+            clipped, clipped_transform = mask(dataset, geometry, crop=True, filled=False)
+        except ValueError:
+            return None
+
+        values = valid_values(clipped[0], dataset.nodata)
+        if values.size == 0:
+            return None
+
+        local_extremes = extreme_value_coords(clipped[0], dataset.nodata, clipped_transform)
+        if local_extremes is None:
+            return None
+
+        local_min, local_min_coord, local_max, local_max_coord = local_extremes
+        slope = slope_values(
+            clipped[0],
+            dataset.nodata,
+            abs(dataset.transform.a),
+            abs(dataset.transform.e),
+        )
+        slope_sum_squares = float(np.square(slope, dtype="float64").sum()) if slope.size else 0.0
+        slope_count = int(slope.size)
+        return TileMetrics(
+            elevation_values=values.astype("float32", copy=False),
+            local_min=local_min,
+            local_max=local_max,
+            min_coord_3006=local_min_coord,
+            max_coord_3006=local_max_coord,
+            slope_sum_squares=slope_sum_squares,
+            slope_count=slope_count,
+        )
+
+
+def apply_tile_metrics(
+    metrics: MetricsAccumulator,
+    tile_metrics: TileMetrics,
+    tile_callback: Callable[[], None] | None = None,
+) -> MetricsAccumulator:
+    metrics.elevation_chunks.append(tile_metrics.elevation_values)
+    if tile_metrics.local_min < metrics.global_min:
+        metrics.global_min = tile_metrics.local_min
+        metrics.min_coord_3006 = tile_metrics.min_coord_3006
+    if tile_metrics.local_max > metrics.global_max:
+        metrics.global_max = tile_metrics.local_max
+        metrics.max_coord_3006 = tile_metrics.max_coord_3006
+
+    metrics.slope_sum_squares += tile_metrics.slope_sum_squares
+    metrics.slope_count += tile_metrics.slope_count
+    metrics.tiles_used += 1
+    if tile_callback is not None:
+        tile_callback()
+    return metrics
+
+
 def update_metrics_from_tiles(
     tif_paths: list[Path],
     tatort_name: str,
@@ -117,40 +184,10 @@ def update_metrics_from_tiles(
 
     for tif_path in tif_paths:
         metrics.tiles_scanned += 1
-        with rasterio.open(tif_path) as dataset:
-            try:
-                clipped, clipped_transform = mask(dataset, geometry, crop=True, filled=False)
-            except ValueError:
-                continue
-
-            values = valid_values(clipped[0], dataset.nodata)
-            if values.size == 0:
-                continue
-
-            metrics.elevation_chunks.append(values.astype("float32", copy=False))
-            local_extremes = extreme_value_coords(clipped[0], dataset.nodata, clipped_transform)
-            if local_extremes is not None:
-                local_min, local_min_coord, local_max, local_max_coord = local_extremes
-                if local_min < metrics.global_min:
-                    metrics.global_min = local_min
-                    metrics.min_coord_3006 = local_min_coord
-                if local_max > metrics.global_max:
-                    metrics.global_max = local_max
-                    metrics.max_coord_3006 = local_max_coord
-
-            slope = slope_values(
-                clipped[0],
-                dataset.nodata,
-                abs(dataset.transform.a),
-                abs(dataset.transform.e),
-            )
-            if slope.size:
-                metrics.slope_sum_squares += float(np.square(slope, dtype="float64").sum())
-                metrics.slope_count += int(slope.size)
-
-            metrics.tiles_used += 1
-            if tile_callback is not None:
-                tile_callback()
+        tile_metrics = compute_tile_metrics(tif_path, geometry)
+        if tile_metrics is None:
+            continue
+        apply_tile_metrics(metrics, tile_metrics, tile_callback=tile_callback)
 
     return metrics
 

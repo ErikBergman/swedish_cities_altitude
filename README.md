@@ -73,5 +73,17 @@ The comparison script will:
 - authenticate once with the Lantmäteriet DEM service
 - discover and download each city's tiles in bounded batches
 - process each city incrementally without keeping all tiles permanently
-- show a Rich progress bar during processing
+- checkpoint progress in `./.state/compare_cities.sqlite`
+- persist per-tile elevation chunks in `./.state/compare_cities_chunks`
+- resume cleanly after interruption without redoing completed cities or tiles
+- show a Rich progress bar with rolling ETAs during processing
 - print a Rich comparison table ranked by hilliness score
+
+You can override the checkpoint locations if needed:
+
+```bash
+python compare_cities.py \
+  --state-db ./tmp/compare_cities.sqlite \
+  --chunk-root ./tmp/compare_cities_chunks \
+  --work-root ./tmp/compare_cities_cache
+```

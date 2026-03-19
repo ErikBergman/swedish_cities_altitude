@@ -70,9 +70,10 @@ def target_filename(href: str) -> str:
     return Path(urlparse(href).path).name
 
 
-def download_tile(tile, destination: Path, username: str, password: str) -> None:
+def download_tile(tile, destination: Path, username: str, password: str, quiet: bool = False) -> None:
     if destination.exists() and destination.stat().st_size == tile.size_bytes:
-        print(f"Skipping existing tile: {destination.name}")
+        if not quiet:
+            print(f"Skipping existing tile: {destination.name}")
         return
 
     opener = build_auth_opener(username, password, tile.href)
@@ -91,7 +92,20 @@ def download_tile(tile, destination: Path, username: str, password: str) -> None
             f"expected {tile.size_bytes}, got {downloaded_size}."
         )
 
-    print(f"Downloaded {destination.name} ({format_mb(tile.size_bytes)})")
+    if not quiet:
+        print(f"Downloaded {destination.name} ({format_mb(tile.size_bytes)})")
+
+
+def cache_usage_bytes(cache_dir: Path) -> int:
+    return sum(path.stat().st_size for path in cache_dir.glob("*") if path.is_file())
+
+
+def download_batch_tiles(selected_batch, cache_dir: Path, username: str, password: str, quiet: bool = False) -> int:
+    total_batch_bytes = sum(tile.size_bytes for tile in selected_batch)
+    for tile in selected_batch:
+        destination = cache_dir / target_filename(tile.href)
+        download_tile(tile, destination, username, password, quiet=quiet)
+    return total_batch_bytes
 
 
 def main() -> int:
@@ -119,18 +133,15 @@ def main() -> int:
     print(f"Selected batch {args.batch}/{len(batches)}: {describe_batch(selected_batch)}")
 
     total_batch_bytes = sum(tile.size_bytes for tile in selected_batch)
-    current_cache_bytes = sum(path.stat().st_size for path in cache_dir.glob("*") if path.is_file())
+    current_cache_bytes = cache_usage_bytes(cache_dir)
     if current_cache_bytes + total_batch_bytes > args.cache_budget_mb * 1024 * 1024:
         raise RuntimeError(
             "Selected batch would exceed the configured cache budget in the target directory. "
             f"Current files: {format_mb(current_cache_bytes)}, batch: {format_mb(total_batch_bytes)}."
         )
 
-    for tile in selected_batch:
-        destination = cache_dir / target_filename(tile.href)
-        download_tile(tile, destination, username, password)
-
-    final_cache_bytes = sum(path.stat().st_size for path in cache_dir.glob("*") if path.is_file())
+    download_batch_tiles(selected_batch, cache_dir, username, password)
+    final_cache_bytes = cache_usage_bytes(cache_dir)
     print(f"Finished batch download. Cache usage: {format_mb(final_cache_bytes)}")
     return 0
 

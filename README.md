@@ -61,3 +61,17 @@ The summary script will:
 - compute normalized relief from elevation percentiles
 - compute RMS slope in degrees
 - report a combined hilliness score
+
+Compare Lund, Malmö, Helsingborg, and Kristianstad with Rich progress and tables:
+
+```bash
+python compare_cities.py --cache-budget-mb 1024
+```
+
+The comparison script will:
+
+- authenticate once with the Lantmäteriet DEM service
+- discover and download each city's tiles in bounded batches
+- process each city incrementally without keeping all tiles permanently
+- show a Rich progress bar during processing
+- print a Rich comparison table ranked by hilliness score

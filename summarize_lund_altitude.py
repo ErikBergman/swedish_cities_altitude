@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,17 @@ import rasterio
 from rasterio.mask import mask
 
 from check_lund_access import DEFAULT_KOMMUN, DEFAULT_TATORT, load_tatort
+
+
+@dataclass
+class MetricsAccumulator:
+    elevation_chunks: list[np.ndarray] = field(default_factory=list)
+    global_min: float = math.inf
+    global_max: float = -math.inf
+    slope_sum_squares: float = 0.0
+    slope_count: int = 0
+    tiles_scanned: int = 0
+    tiles_used: int = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,27 +68,18 @@ def slope_values(band, nodata, x_res: float, y_res: float) -> np.ndarray:
     return slope.ravel()[mask_valid & source_mask]
 
 
-def main() -> int:
-    args = parse_args()
-    cache_dir = Path(args.cache_dir)
-    if not cache_dir.is_dir():
-        raise ValueError(f"Cache directory does not exist: {cache_dir}")
-
-    tif_paths = sorted(cache_dir.glob("*.tif"))
-    if not tif_paths:
-        raise ValueError(f"No .tif files found in cache directory: {cache_dir}")
-
-    tatort = load_tatort(args.tatort, args.kommun)
+def update_metrics_from_tiles(
+    tif_paths: list[Path],
+    tatort_name: str,
+    kommun_name: str,
+    accumulator: MetricsAccumulator | None = None,
+) -> MetricsAccumulator:
+    tatort = load_tatort(tatort_name, kommun_name)
     geometry = [tatort.geometry.iloc[0].__geo_interface__]
-
-    elevation_chunks: list[np.ndarray] = []
-    global_min = math.inf
-    global_max = -math.inf
-    slope_sum_squares = 0.0
-    slope_count = 0
-    used_tiles = 0
+    metrics = accumulator or MetricsAccumulator()
 
     for tif_path in tif_paths:
+        metrics.tiles_scanned += 1
         with rasterio.open(tif_path) as dataset:
             try:
                 clipped, _ = mask(dataset, geometry, crop=True, filled=False)
@@ -87,9 +90,9 @@ def main() -> int:
             if values.size == 0:
                 continue
 
-            elevation_chunks.append(values.astype("float32", copy=False))
-            global_min = min(global_min, float(values.min()))
-            global_max = max(global_max, float(values.max()))
+            metrics.elevation_chunks.append(values.astype("float32", copy=False))
+            metrics.global_min = min(metrics.global_min, float(values.min()))
+            metrics.global_max = max(metrics.global_max, float(values.max()))
 
             slope = slope_values(
                 clipped[0],
@@ -98,34 +101,76 @@ def main() -> int:
                 abs(dataset.transform.e),
             )
             if slope.size:
-                slope_sum_squares += float(np.square(slope, dtype="float64").sum())
-                slope_count += int(slope.size)
+                metrics.slope_sum_squares += float(np.square(slope, dtype="float64").sum())
+                metrics.slope_count += int(slope.size)
 
-            used_tiles += 1
+            metrics.tiles_used += 1
 
-    if not math.isfinite(global_min) or not math.isfinite(global_max) or not elevation_chunks:
-        raise RuntimeError("No valid DEM pixels intersected the tatort in the provided cache directory.")
+    return metrics
 
-    elevations = np.concatenate(elevation_chunks)
+
+def finalize_metrics(
+    tatort_name: str,
+    kommun_name: str,
+    metrics: MetricsAccumulator,
+) -> dict[str, float | int | str]:
+    if not math.isfinite(metrics.global_min) or not math.isfinite(metrics.global_max) or not metrics.elevation_chunks:
+        raise RuntimeError("No valid DEM pixels intersected the tatort in the provided tiles.")
+
+    tatort = load_tatort(tatort_name, kommun_name)
+    elevations = np.concatenate(metrics.elevation_chunks)
     relief_q05 = float(np.percentile(elevations, 5))
     relief_q95 = float(np.percentile(elevations, 95))
     area_km2 = float(tatort.geometry.iloc[0].area) / 1_000_000
     normalized_relief = (relief_q95 - relief_q05) / math.sqrt(area_km2)
-    rms_slope = math.sqrt(slope_sum_squares / slope_count) if slope_count else 0.0
+    rms_slope = math.sqrt(metrics.slope_sum_squares / metrics.slope_count) if metrics.slope_count else 0.0
     hilliness_score = normalized_relief * rms_slope
 
-    print(f"Tatort: {args.tatort} ({args.kommun})")
-    print(f"Tatortskod: {tatort.iloc[0]['tatortskod']}")
-    print(f"Tiles scanned: {len(tif_paths)}")
-    print(f"Tiles used: {used_tiles}")
-    print(f"Min altitude: {global_min:.2f} m")
-    print(f"Max altitude: {global_max:.2f} m")
-    print(f"Altitude range: {global_max - global_min:.2f} m")
-    print(f"Relief Q05: {relief_q05:.2f} m")
-    print(f"Relief Q95: {relief_q95:.2f} m")
-    print(f"Normalized relief: {normalized_relief:.2f}")
-    print(f"RMS slope: {rms_slope:.2f} deg")
-    print(f"Hilliness score: {hilliness_score:.2f}")
+    return {
+        "tatort": tatort_name,
+        "kommun": kommun_name,
+        "tatortskod": tatort.iloc[0]["tatortskod"],
+        "tiles_scanned": metrics.tiles_scanned,
+        "tiles_used": metrics.tiles_used,
+        "min_altitude_m": metrics.global_min,
+        "max_altitude_m": metrics.global_max,
+        "altitude_range_m": metrics.global_max - metrics.global_min,
+        "relief_q05_m": relief_q05,
+        "relief_q95_m": relief_q95,
+        "normalized_relief": normalized_relief,
+        "rms_slope_deg": rms_slope,
+        "hilliness_score": hilliness_score,
+    }
+
+
+def main() -> int:
+    args = parse_args()
+    cache_dir = Path(args.cache_dir)
+    if not cache_dir.is_dir():
+        raise ValueError(f"Cache directory does not exist: {cache_dir}")
+
+    tif_paths = sorted(cache_dir.glob("*.tif"))
+    if not tif_paths:
+        raise ValueError(f"No .tif files found in cache directory: {cache_dir}")
+
+    summary = finalize_metrics(
+        args.tatort,
+        args.kommun,
+        update_metrics_from_tiles(tif_paths, args.tatort, args.kommun),
+    )
+
+    print(f"Tatort: {summary['tatort']} ({summary['kommun']})")
+    print(f"Tatortskod: {summary['tatortskod']}")
+    print(f"Tiles scanned: {summary['tiles_scanned']}")
+    print(f"Tiles used: {summary['tiles_used']}")
+    print(f"Min altitude: {summary['min_altitude_m']:.2f} m")
+    print(f"Max altitude: {summary['max_altitude_m']:.2f} m")
+    print(f"Altitude range: {summary['altitude_range_m']:.2f} m")
+    print(f"Relief Q05: {summary['relief_q05_m']:.2f} m")
+    print(f"Relief Q95: {summary['relief_q95_m']:.2f} m")
+    print(f"Normalized relief: {summary['normalized_relief']:.2f}")
+    print(f"RMS slope: {summary['rms_slope_deg']:.2f} deg")
+    print(f"Hilliness score: {summary['hilliness_score']:.2f}")
     return 0
 
 

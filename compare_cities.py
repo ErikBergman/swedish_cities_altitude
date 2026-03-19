@@ -29,7 +29,7 @@ from check_lund_access import (
     verify_asset_access,
 )
 from download_lund_batch import cache_usage_bytes, download_batch_tiles
-from summarize_lund_altitude import MetricsAccumulator, finalize_metrics, update_metrics_from_tiles
+from summarize_lund_altitude import MetricsAccumulator, finalize_metrics, format_coord, update_metrics_from_tiles
 
 
 DEFAULT_CITIES = [
@@ -147,7 +147,9 @@ def main() -> int:
     table.add_column("Tiles", justify="right")
     table.add_column("Batches", justify="right")
     table.add_column("Min m", justify="right")
+    table.add_column("Min Coord")
     table.add_column("Max m", justify="right")
+    table.add_column("Max Coord")
     table.add_column("Norm Relief", justify="right")
     table.add_column("RMS Slope", justify="right")
     table.add_column("Score", justify="right")
@@ -160,7 +162,9 @@ def main() -> int:
             str(row["tiles_used"]),
             str(row["batches"]),
             f"{float(row['min_altitude_m']):.2f}",
+            format_coord(row["min_coord_3006"]),
             f"{float(row['max_altitude_m']):.2f}",
+            format_coord(row["max_coord_3006"]),
             f"{float(row['normalized_relief']):.2f}",
             f"{float(row['rms_slope_deg']):.2f}",
             f"{float(row['hilliness_score']):.2f}",

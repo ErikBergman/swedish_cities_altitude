@@ -10,9 +10,13 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+from pyproj import Transformer
 from rasterio.mask import mask
 
 from check_lund_access import DEFAULT_KOMMUN, DEFAULT_TATORT, load_tatort
+
+
+SWEREF99TM_TO_WGS84 = Transformer.from_crs(3006, 4326, always_xy=True)
 
 
 @dataclass
@@ -20,6 +24,8 @@ class MetricsAccumulator:
     elevation_chunks: list[np.ndarray] = field(default_factory=list)
     global_min: float = math.inf
     global_max: float = -math.inf
+    min_coord_3006: tuple[float, float] | None = None
+    max_coord_3006: tuple[float, float] | None = None
     slope_sum_squares: float = 0.0
     slope_count: int = 0
     tiles_scanned: int = 0
@@ -68,6 +74,35 @@ def slope_values(band, nodata, x_res: float, y_res: float) -> np.ndarray:
     return slope.ravel()[mask_valid & source_mask]
 
 
+def extreme_value_coords(band, nodata, transform) -> tuple[float, tuple[float, float], float, tuple[float, float]] | None:
+    values = np.ma.filled(band, np.nan).astype("float64", copy=False)
+    valid_mask = np.isfinite(values)
+    if nodata is not None and not math.isnan(nodata):
+        valid_mask &= ~np.isclose(values, nodata)
+
+    if not valid_mask.any():
+        return None
+
+    min_candidates = np.where(valid_mask, values, np.inf)
+    max_candidates = np.where(valid_mask, values, -np.inf)
+
+    min_index = np.unravel_index(np.argmin(min_candidates), values.shape)
+    max_index = np.unravel_index(np.argmax(max_candidates), values.shape)
+
+    min_value = float(values[min_index])
+    max_value = float(values[max_index])
+    min_x, min_y = rasterio.transform.xy(transform, min_index[0], min_index[1], offset="center")
+    max_x, max_y = rasterio.transform.xy(transform, max_index[0], max_index[1], offset="center")
+    return min_value, (float(min_x), float(min_y)), max_value, (float(max_x), float(max_y))
+
+
+def format_coord(coord: tuple[float, float] | None) -> str:
+    if coord is None:
+        return "N/A"
+    lon, lat = SWEREF99TM_TO_WGS84.transform(coord[0], coord[1])
+    return f"({lat:.6f}, {lon:.6f})"
+
+
 def update_metrics_from_tiles(
     tif_paths: list[Path],
     tatort_name: str,
@@ -82,7 +117,7 @@ def update_metrics_from_tiles(
         metrics.tiles_scanned += 1
         with rasterio.open(tif_path) as dataset:
             try:
-                clipped, _ = mask(dataset, geometry, crop=True, filled=False)
+                clipped, clipped_transform = mask(dataset, geometry, crop=True, filled=False)
             except ValueError:
                 continue
 
@@ -91,8 +126,15 @@ def update_metrics_from_tiles(
                 continue
 
             metrics.elevation_chunks.append(values.astype("float32", copy=False))
-            metrics.global_min = min(metrics.global_min, float(values.min()))
-            metrics.global_max = max(metrics.global_max, float(values.max()))
+            local_extremes = extreme_value_coords(clipped[0], dataset.nodata, clipped_transform)
+            if local_extremes is not None:
+                local_min, local_min_coord, local_max, local_max_coord = local_extremes
+                if local_min < metrics.global_min:
+                    metrics.global_min = local_min
+                    metrics.min_coord_3006 = local_min_coord
+                if local_max > metrics.global_max:
+                    metrics.global_max = local_max
+                    metrics.max_coord_3006 = local_max_coord
 
             slope = slope_values(
                 clipped[0],
@@ -134,6 +176,8 @@ def finalize_metrics(
         "tiles_used": metrics.tiles_used,
         "min_altitude_m": metrics.global_min,
         "max_altitude_m": metrics.global_max,
+        "min_coord_3006": metrics.min_coord_3006,
+        "max_coord_3006": metrics.max_coord_3006,
         "altitude_range_m": metrics.global_max - metrics.global_min,
         "relief_q05_m": relief_q05,
         "relief_q95_m": relief_q95,
@@ -164,7 +208,9 @@ def main() -> int:
     print(f"Tiles scanned: {summary['tiles_scanned']}")
     print(f"Tiles used: {summary['tiles_used']}")
     print(f"Min altitude: {summary['min_altitude_m']:.2f} m")
+    print(f"Min coordinate (lat, lon): {format_coord(summary['min_coord_3006'])}")
     print(f"Max altitude: {summary['max_altitude_m']:.2f} m")
+    print(f"Max coordinate (lat, lon): {format_coord(summary['max_coord_3006'])}")
     print(f"Altitude range: {summary['altitude_range_m']:.2f} m")
     print(f"Relief Q05: {summary['relief_q05_m']:.2f} m")
     print(f"Relief Q95: {summary['relief_q95_m']:.2f} m")

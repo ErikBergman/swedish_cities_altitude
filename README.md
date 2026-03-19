@@ -58,3 +58,6 @@ The summary script will:
 - scan the downloaded `.tif` tiles in the cache directory
 - clip them to the tatort boundary
 - report `min`, `max`, and altitude range
+- compute normalized relief from elevation percentiles
+- compute RMS slope in degrees
+- report a combined hilliness score

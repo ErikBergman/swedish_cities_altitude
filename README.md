@@ -32,3 +32,16 @@ The script will:
 - verify authenticated access to one sample DEM asset
 - plan temporary download batches within a cache budget
 - show how Lund can be processed without permanently storing the full dataset
+
+Download the planned Lund batch into a temporary cache directory:
+
+```bash
+python3 download_lund_batch.py --cache-budget-mb 1024
+```
+
+The downloader will:
+
+- reuse the same Lund batch planning
+- create a temporary cache directory unless `--cache-dir` is provided
+- download one batch of tiles with Basic auth
+- skip tiles that already exist at the expected size

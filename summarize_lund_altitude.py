@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -108,6 +109,7 @@ def update_metrics_from_tiles(
     tatort_name: str,
     kommun_name: str,
     accumulator: MetricsAccumulator | None = None,
+    tile_callback: Callable[[], None] | None = None,
 ) -> MetricsAccumulator:
     tatort = load_tatort(tatort_name, kommun_name)
     geometry = [tatort.geometry.iloc[0].__geo_interface__]
@@ -147,6 +149,8 @@ def update_metrics_from_tiles(
                 metrics.slope_count += int(slope.size)
 
             metrics.tiles_used += 1
+            if tile_callback is not None:
+                tile_callback()
 
     return metrics
 

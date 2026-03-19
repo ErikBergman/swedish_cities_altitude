@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import os
 import sys
 import tempfile
@@ -70,7 +71,14 @@ def target_filename(href: str) -> str:
     return Path(urlparse(href).path).name
 
 
-def download_tile(tile, destination: Path, username: str, password: str, quiet: bool = False) -> None:
+def download_tile(
+    tile,
+    destination: Path,
+    username: str,
+    password: str,
+    quiet: bool = False,
+    progress_callback: Callable[[int], None] | None = None,
+) -> None:
     if destination.exists() and destination.stat().st_size == tile.size_bytes:
         if not quiet:
             print(f"Skipping existing tile: {destination.name}")
@@ -84,6 +92,8 @@ def download_tile(tile, destination: Path, username: str, password: str, quiet: 
             if not chunk:
                 break
             output.write(chunk)
+            if progress_callback is not None:
+                progress_callback(len(chunk))
 
     downloaded_size = destination.stat().st_size
     if downloaded_size != tile.size_bytes:
@@ -100,11 +110,25 @@ def cache_usage_bytes(cache_dir: Path) -> int:
     return sum(path.stat().st_size for path in cache_dir.glob("*") if path.is_file())
 
 
-def download_batch_tiles(selected_batch, cache_dir: Path, username: str, password: str, quiet: bool = False) -> int:
+def download_batch_tiles(
+    selected_batch,
+    cache_dir: Path,
+    username: str,
+    password: str,
+    quiet: bool = False,
+    progress_callback: Callable[[int], None] | None = None,
+) -> int:
     total_batch_bytes = sum(tile.size_bytes for tile in selected_batch)
     for tile in selected_batch:
         destination = cache_dir / target_filename(tile.href)
-        download_tile(tile, destination, username, password, quiet=quiet)
+        download_tile(
+            tile,
+            destination,
+            username,
+            password,
+            quiet=quiet,
+            progress_callback=progress_callback,
+        )
     return total_batch_bytes
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -16,9 +17,9 @@ from shapely.geometry import box
 API_ROOT = "https://api.lantmateriet.se/stac-hojd/v1"
 GPKG_PATH = "Tatorter_2023.gpkg"
 GPKG_LAYER = "Tatorter_2023"
-TARGET_TATORT = "Lund"
-TARGET_KOMMUN = "Lund"
-SIZE_LIMIT_MB = 50
+DEFAULT_TATORT = "Lund"
+DEFAULT_KOMMUN = "Lund"
+DEFAULT_CACHE_BUDGET_MB = 1024
 
 
 @dataclass
@@ -30,21 +31,39 @@ class TileInfo:
     bbox_3006: tuple[float, float, float, float]
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Check authenticated access to Lantmateriet DEM tiles and plan a "
+            "temporary-cache batch strategy for one tatort."
+        )
+    )
+    parser.add_argument("--tatort", default=DEFAULT_TATORT, help="Tatort name to inspect.")
+    parser.add_argument("--kommun", default=DEFAULT_KOMMUN, help="Kommun name to disambiguate the tatort.")
+    parser.add_argument(
+        "--cache-budget-mb",
+        type=int,
+        default=DEFAULT_CACHE_BUDGET_MB,
+        help="Maximum temporary cache size to assume when planning download batches.",
+    )
+    return parser.parse_args()
+
+
 def fetch_json(url: str) -> dict:
     with urllib.request.urlopen(url) as response:
         return json.load(response)
 
 
-def load_lund_tatort() -> gpd.GeoDataFrame:
+def load_tatort(tatort_name: str, kommun_name: str) -> gpd.GeoDataFrame:
     cities = gpd.read_file(GPKG_PATH, layer=GPKG_LAYER).to_crs(3006)
-    lund = cities.loc[
-        (cities["tatort"] == TARGET_TATORT) & (cities["kommunnamn"] == TARGET_KOMMUN)
+    tatort = cities.loc[
+        (cities["tatort"] == tatort_name) & (cities["kommunnamn"] == kommun_name)
     ].copy()
-    if len(lund) != 1:
+    if len(tatort) != 1:
         raise ValueError(
-            f"Expected exactly one tatort for {TARGET_TATORT}/{TARGET_KOMMUN}, found {len(lund)}."
+            f"Expected exactly one tatort for {tatort_name}/{kommun_name}, found {len(tatort)}."
         )
-    return lund
+    return tatort
 
 
 def find_covering_collections(tatort: gpd.GeoDataFrame) -> list[str]:
@@ -93,7 +112,7 @@ def fetch_intersecting_tiles(tatort: gpd.GeoDataFrame, collection_ids: list[str]
     if not tiles:
         raise ValueError("No DEM tiles intersect the target tatort.")
 
-    return tiles
+    return sorted(tiles, key=lambda tile: (tile.bbox_3006[1], tile.bbox_3006[0]))
 
 
 def format_mb(size_bytes: int) -> str:
@@ -119,11 +138,8 @@ def verify_asset_access(sample_tile: TileInfo, username: str, password: str) -> 
     password_manager.add_password(None, sample_tile.href, username, password)
     auth_handler = urllib.request.HTTPBasicAuthHandler(password_manager)
     opener = urllib.request.build_opener(auth_handler)
-    request = urllib.request.Request(
-        sample_tile.href,
-        headers={"Range": "bytes=0-0"},
-        method="GET",
-    )
+    request = urllib.request.Request(sample_tile.href, headers={"Range": "bytes=0-0"}, method="GET")
+
     try:
         with opener.open(request, timeout=30) as response:
             status_code = response.status
@@ -141,35 +157,80 @@ def verify_asset_access(sample_tile: TileInfo, username: str, password: str) -> 
     return status_code, content_length
 
 
+def plan_batches(tiles: list[TileInfo], cache_budget_bytes: int) -> list[list[TileInfo]]:
+    if cache_budget_bytes <= 0:
+        raise ValueError("--cache-budget-mb must be greater than 0.")
+
+    if any(tile.size_bytes > cache_budget_bytes for tile in tiles):
+        largest = max(tile.size_bytes for tile in tiles)
+        raise RuntimeError(
+            "At least one DEM tile is larger than the cache budget. "
+            f"Largest tile: {format_mb(largest)}."
+        )
+
+    batches: list[list[TileInfo]] = []
+    current_batch: list[TileInfo] = []
+    current_size = 0
+
+    for tile in tiles:
+        if current_size + tile.size_bytes > cache_budget_bytes and current_batch:
+            batches.append(current_batch)
+            current_batch = []
+            current_size = 0
+
+        current_batch.append(tile)
+        current_size += tile.size_bytes
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
+
+
+def describe_batch(batch: list[TileInfo]) -> str:
+    size_bytes = sum(tile.size_bytes for tile in batch)
+    first_id = batch[0].item_id
+    last_id = batch[-1].item_id
+    return f"{len(batch)} tiles, {format_mb(size_bytes)}, ids {first_id} -> {last_id}"
+
+
 def main() -> int:
-    lund = load_lund_tatort()
-    collections = find_covering_collections(lund)
-    tiles = fetch_intersecting_tiles(lund, collections)
+    args = parse_args()
+    tatort = load_tatort(args.tatort, args.kommun)
+    collections = find_covering_collections(tatort)
+    tiles = fetch_intersecting_tiles(tatort, collections)
+
     total_bytes = sum(tile.size_bytes for tile in tiles)
-    sample_tile = tiles[0]
+    cache_budget_bytes = args.cache_budget_mb * 1024 * 1024
+    batches = plan_batches(tiles, cache_budget_bytes)
 
     username, password = require_credentials()
+    sample_tile = tiles[0]
     status_code, content_length = verify_asset_access(sample_tile, username, password)
 
-    print(f"Tatort: {TARGET_TATORT} ({TARGET_KOMMUN})")
-    print(f"Tatortskod: {lund.iloc[0]['tatortskod']}")
+    print(f"Tatort: {args.tatort} ({args.kommun})")
+    print(f"Tatortskod: {tatort.iloc[0]['tatortskod']}")
     print(f"Collections: {', '.join(collections)}")
     print(f"Intersecting tiles: {len(tiles)}")
-    print(f"Estimated dataset size: {format_mb(total_bytes)}")
-    print(f"Sample tile: {sample_tile.item_id}")
+    print(f"Total raw size: {format_mb(total_bytes)}")
+    print(f"Temporary cache budget: {args.cache_budget_mb} MB")
+    print(f"Planned batches: {len(batches)}")
+    for index, batch in enumerate(batches, start=1):
+        print(f"  Batch {index}: {describe_batch(batch)}")
+
     print(f"Sample tile URL: {sample_tile.href}")
     print(f"Authenticated test status: {status_code}")
     if content_length:
         print(f"Authenticated response content-length: {content_length}")
 
-    if total_bytes > SIZE_LIMIT_MB * 1024 * 1024:
+    if len(batches) == 1:
+        print("This tatort fits within the temporary cache budget as a single working set.")
+    else:
         print(
-            f"Download blocked: estimated size exceeds {SIZE_LIMIT_MB} MB. "
-            "Approval is required before downloading DEM tiles."
+            "This tatort does not need to be stored permanently. "
+            "It can be processed in multiple temporary batches."
         )
-        return 2
 
-    print("Dataset is within the automatic download limit.")
     return 0
 
 

@@ -22,7 +22,7 @@ export LANTMATERIET_PASSWORD="your-password"
 Run the Lund access check:
 
 ```bash
-python3 check_lund_dem_access.py
+python3 check_lund_access.py
 ```
 
 The script will:
@@ -30,4 +30,5 @@ The script will:
 - read the Lund tatort polygon from `Tatorter_2023.gpkg`
 - find intersecting DEM tiles through the public STAC metadata
 - verify authenticated access to one sample DEM asset
-- stop before download if the estimated raw dataset exceeds `50 MB`
+- plan temporary download batches within a cache budget
+- show how Lund can be processed without permanently storing the full dataset

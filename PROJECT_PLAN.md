@@ -18,6 +18,11 @@ The final output should be one summary row per `tätort`, containing terrain sta
 
 The purpose is to analyze how terrain varies between Swedish urban areas without generating an unnecessary nationwide point table.
 
+Storage constraint:
+- the program must not require permanent storage of the full nationwide DEM
+- temporary storage in the low single-digit GB range is acceptable
+- the workflow should therefore be built around bounded caching and incremental processing
+
 ## Core Principle
 
 Use polygon-based raster analysis rather than converting all of Sweden into a giant `(x, y) -> tätort / N/A` lookup table.
@@ -58,6 +63,11 @@ Expected role in the pipeline:
 - provides raster values for altitude calculations
 - provides the base raster from which slope will be derived
 
+Storage implication:
+- the full set of DEM tiles intersecting all Swedish tätorter is large
+- raw nationwide coverage should be treated as a remote source, not as a required local dataset
+- only a small working set of tiles should exist on disk at any given time
+
 ### 3. Authentication and access model
 
 Confirmed behavior:
@@ -96,22 +106,27 @@ Deliverable:
 Tasks:
 - query the Lantmäteriet STAC API for relevant collections
 - find all DEM tiles intersecting Swedish tätort polygons
-- download and cache tiles locally instead of relying on anonymous remote reads
+- download and cache tiles locally in small batches
 - avoid repeated requests for the same tile
 - read authentication credentials from environment variables only
 - estimate the total dataset size before downloading any raster files
-- stop and require approval if the requested dataset exceeds `50 MB`
+- keep only a bounded temporary tile cache on disk
+- evict already-processed tiles when the cache budget is exceeded
+- support a configurable cache budget, with the default target in the low single-digit GB range
+- stop and require approval before downloading a batch that exceeds the active cache budget
 
 Deliverable:
 - a tile index table with:
   - tile id
   - source URL
   - projected bounding box
-  - local cached path if downloaded
+  - local cached path if currently downloaded
+  - processing status
 
 Why this matters:
 - the analysis should not refetch the same tiles repeatedly
 - tile management should be separate from terrain statistics
+- storage use must remain bounded and predictable
 
 ### Phase 2A. STAC API workflow
 
@@ -126,14 +141,16 @@ The acquisition layer should follow this exact sequence:
    - `assets.data.proj:bbox` or `properties.proj:bbox`
 5. Intersect the polygon with each tile bbox in projected coordinates
 6. Sum the `file:size` values of intersecting tiles
-7. Compare the total size against the `50 MB` dataset limit
-8. If the limit is exceeded:
+7. Group intersecting tiles into a download batch that fits within the active cache budget
+8. If a proposed batch exceeds the budget:
    - stop
    - report the tile count and total estimated download size
    - require explicit user approval before downloading
-9. If the limit is within threshold:
-   - download the intersecting tiles using Basic auth
-   - store them under a deterministic cache path
+9. If the batch fits within the budget:
+   - download the batch using Basic auth
+   - store it under a deterministic cache path
+10. Process the tiles immediately and update per-tätort summary statistics
+11. Remove or evict processed tiles when the cache budget needs to be reclaimed
 
 ### Phase 2B. Lund PoC discovery result
 
@@ -156,10 +173,23 @@ Known tile estimate for Lund:
 - total raw DEM size: about `98.19 MB`
 
 Implication:
-- the Lund raw dataset exceeds the current automatic-download threshold
-- the program should therefore stop and require approval before downloading Lund DEM tiles
+- Lund is still small enough for a proof of concept
+- Lund does not need to remain on disk after processing
+- Lund should be handled as a temporary working set, not a permanent dataset
 
-### Phase 2C. Authentication implementation
+### Phase 2C. Nationwide storage estimate
+
+Known nationwide estimate from STAC metadata:
+- `2017` tätorter
+- about `6970` unique DEM tiles intersect at least one tätort
+- about `58.14 GB` of raw DEM tiles if all unique intersecting tiles were stored at once
+
+Implication:
+- storing all required raw tiles permanently is unnecessary and undesirable
+- the nationwide pipeline must process tiles incrementally
+- only intermediate summaries and a bounded temporary cache should remain local
+
+### Phase 2D. Authentication implementation
 
 The downloader should use Basic auth against `dl1.lantmateriet.se`.
 
@@ -187,11 +217,39 @@ curl -I -u "$LANTMATERIET_USERNAME" \
   "https://dl1.lantmateriet.se/hojd/data/grid1m/61_3/55/61750_3850_25.tif"
 ```
 
+### Phase 2E. Incremental processing model
+
+The full pipeline should not depend on storing all DEM tiles locally.
+
+Recommended model:
+
+1. Build the complete tile index from STAC metadata
+2. For each tile:
+   - determine which tätorter intersect it
+   - download the tile into the temporary cache
+   - compute altitude and slope contributions for the intersecting tätorter
+   - update persistent summary state
+   - delete or evict the tile when it is no longer needed
+3. Repeat until all tiles are processed
+
+Persistent outputs should remain small:
+- tile index metadata
+- per-tätort running summary tables
+- final CSV outputs
+
+Temporary outputs should be bounded:
+- raw DEM tile cache
+- temporary slope rasters or working windows
+
+The default implementation should aim for:
+- a cache budget in the low single-digit GB range
+- no requirement to keep previously processed raw tiles once summaries are updated
+
 ### Phase 3. Compute altitude statistics per tätort
 
 Tasks:
-- for each tätort polygon, identify intersecting DEM tiles
-- clip raster cells to the polygon
+- for each downloaded tile, identify the intersecting tätort polygons
+- clip raster cells to those polygons
 - calculate:
   - `min_altitude_m`
   - `max_altitude_m`
@@ -199,6 +257,7 @@ Tasks:
   - `median_altitude_m`
   - `altitude_range_m`
   - optionally `std_altitude_m`
+- update per-tätort running aggregates incrementally rather than requiring all DEM data at once
 
 Deliverable:
 - one CSV or GeoPackage table with one row per tätort
@@ -206,6 +265,7 @@ Deliverable:
 Notes:
 - this is classic zonal statistics
 - no national point-grid intermediate is required
+- the implementation should be able to resume after partial progress if interrupted
 
 ### Phase 4. Compute slope raster
 
@@ -214,10 +274,11 @@ Tasks:
 - choose a slope unit:
   - degrees is usually easier to interpret
   - percent can be added if needed
-- compute slope per DEM tile once and cache it
+- compute slope per DEM tile once within the temporary cache
+- avoid retaining derived slope rasters permanently unless needed for debugging or reuse
 
 Deliverable:
-- cached slope rasters corresponding to DEM tiles
+- temporary or optional cached slope rasters corresponding to DEM tiles
 
 Why this matters:
 - slope should be derived from terrain gradients, not from polygon shape
@@ -260,12 +321,13 @@ Recommended structure once implementation starts:
 
 - `data/raw/`
   - original GeoPackage
-  - raw downloaded DEM tiles
 - `data/cache/`
   - tile index
-  - processed slope rasters
+  - temporary DEM tile cache
+  - optional temporary slope rasters
 - `data/output/`
   - final CSV summaries
+  - persistent intermediate summary tables if needed for resumability
 - `src/`
   - acquisition, analysis, and utility modules
 - `notebooks/`
@@ -289,10 +351,16 @@ Purpose:
 ### `src/tile_cache.py`
 
 Purpose:
-- download and reuse DEM tiles locally
-- track which tiles have already been fetched
-- enforce the `50 MB` per-dataset download limit unless explicit approval has been given
+- download and reuse DEM tiles locally in a bounded cache
+- track which tiles have already been fetched and processed
+- evict processed tiles when the cache budget is reached
 - use `LANTMATERIET_USERNAME` and `LANTMATERIET_PASSWORD` for Basic-auth downloads
+
+### `src/aggregates.py`
+
+Purpose:
+- maintain persistent per-tätort running statistics
+- support resumable processing without keeping all DEM tiles on disk
 
 ### `src/zonal_altitude.py`
 
@@ -350,6 +418,7 @@ Purpose:
 - mask rasters by polygon
 - read raster windows efficiently
 - write derived slope rasters if needed
+- support tile-by-tile processing without full mosaics
 
 ### `numpy`
 
@@ -363,6 +432,7 @@ Purpose:
 Purpose:
 - tabular result assembly
 - export of summary tables to CSV
+- persist intermediate aggregate tables when resumability is needed
 
 ### `requests`
 
@@ -417,6 +487,20 @@ Reason:
 - makes reruns deterministic
 - simplifies debugging
 
+### Keep the cache bounded
+
+Do not let temporary DEM storage grow without limit.
+
+Rule:
+- use a configurable cache budget
+- target low single-digit GB storage by default
+- evict processed tiles when space is needed
+
+Reason:
+- avoids requiring tens of gigabytes of permanent disk
+- makes nationwide processing feasible on a normal laptop
+- matches the intended tile-by-tile pipeline
+
 ### Keep credentials in environment variables only
 
 Do not place service credentials in:
@@ -430,18 +514,18 @@ Reason:
 - keeps local and CI execution patterns consistent
 - matches the confirmed Basic-auth download flow
 
-### Enforce the size gate before download
+### Enforce the batch gate before download
 
-The downloader must estimate total raw tile size before downloading.
+The downloader must estimate batch size before downloading.
 
 Rule:
-- if total intersecting tile size is `<= 50 MB`, automatic download is allowed
-- if total intersecting tile size is `> 50 MB`, the program must stop and require approval
+- if a proposed download batch fits within the active cache budget, automatic download is allowed
+- if a proposed batch exceeds the budget, the program must stop and require approval
 
 Reason:
-- prevents unexpectedly large downloads
-- makes Lund-style proof-of-concept runs predictable
-- keeps data acquisition separate from analysis approval
+- prevents unexpectedly large temporary downloads
+- keeps local storage predictable
+- separates storage control from the total nationwide dataset size
 
 ### Compute slope once per tile
 
@@ -497,6 +581,7 @@ Mitigation:
 - use tile-level processing
 - cache intermediate products
 - avoid point-grid explosion
+- avoid full-country local mosaics
 
 ### Memory usage
 
@@ -506,15 +591,26 @@ Mitigation:
 - never build a full Sweden mosaic in memory
 - process by tile and aggregate incrementally
 
+### Disk usage
+
+Nationwide raw tiles are much larger than the desired local storage footprint.
+
+Mitigation:
+- use a bounded temporary cache
+- persist only summaries and metadata
+- delete or evict tiles after their contribution has been absorbed
+
 ## First Implementation Milestone
 
 The first milestone should be deliberately narrow:
 
 1. read `Tatorter_2023.gpkg`
 2. fetch or index DEM tiles for one known area such as Stockholm
-3. compute `min`, `max`, and `mean` altitude for one tätort
-4. compute mean slope for the same tätort
-5. verify the result manually
+3. verify authenticated access for one sample tile
+4. download only a small temporary working set
+5. compute `min`, `max`, and `mean` altitude for one tätort
+6. compute mean slope for the same tätort
+7. verify the result manually
 
 Only after that works should the script be expanded to all Swedish tätorter.
 
@@ -524,7 +620,7 @@ When the project is complete, the repository should contain:
 
 - a reproducible environment specification
 - a script or CLI that runs the full analysis
-- cached or indexed DEM tile management
+- bounded cached or indexed DEM tile management
 - a final CSV of per-tätort terrain statistics
 - a short methodology note explaining:
   - data sources

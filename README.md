@@ -45,3 +45,16 @@ The downloader will:
 - create a temporary cache directory unless `--cache-dir` is provided
 - download one batch of tiles with Basic auth
 - skip tiles that already exist at the expected size
+
+Summarize Lund altitude from downloaded tiles:
+
+```bash
+python3 summarize_lund_altitude.py --cache-dir ./tmp/lund_cache
+```
+
+The summary script will:
+
+- read the Lund tatort polygon
+- scan the downloaded `.tif` tiles in the cache directory
+- clip them to the tatort boundary
+- report `min`, `max`, and altitude range

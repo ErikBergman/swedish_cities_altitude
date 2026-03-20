@@ -8,6 +8,7 @@ import os
 import sys
 import urllib.request
 from dataclasses import dataclass
+from functools import lru_cache
 from urllib.error import HTTPError
 
 import geopandas as gpd
@@ -54,8 +55,17 @@ def fetch_json(url: str) -> dict:
         return json.load(response)
 
 
+@lru_cache(maxsize=1)
+def _load_all_tatorter_cached() -> gpd.GeoDataFrame:
+    return gpd.read_file(GPKG_PATH, layer=GPKG_LAYER).to_crs(3006)
+
+
+def load_all_tatorter() -> gpd.GeoDataFrame:
+    return _load_all_tatorter_cached().copy()
+
+
 def load_tatort(tatort_name: str, kommun_name: str) -> gpd.GeoDataFrame:
-    cities = gpd.read_file(GPKG_PATH, layer=GPKG_LAYER).to_crs(3006)
+    cities = _load_all_tatorter_cached()
     tatort = cities.loc[
         (cities["tatort"] == tatort_name) & (cities["kommunnamn"] == kommun_name)
     ].copy()

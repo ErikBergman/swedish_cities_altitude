@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import shutil
 import sys
 import time
@@ -32,6 +33,7 @@ from check_lund_access import (
     fetch_intersecting_tiles,
     find_covering_collections,
     format_mb,
+    load_all_tatorter,
     load_tatort,
     plan_batches,
     require_credentials,
@@ -47,18 +49,13 @@ from summarize_lund_altitude import (
     format_coord,
 )
 
-
-DEFAULT_CITIES = [
-    ("Lund", "Lund"),
-    ("Malmö", "Malmö"),
-    ("Helsingborg", "Helsingborg"),
-    ("Kristianstad", "Kristianstad"),
-]
 DEFAULT_DOWNLOAD_RATE_MBPS = 16.0
 DEFAULT_PROCESSING_SECONDS_PER_TILE = 0.5
 DEFAULT_WORK_ROOT = Path(".cache/compare_cities")
 DEFAULT_STATE_DB = Path(".state/compare_cities.sqlite")
 DEFAULT_CHUNK_ROOT = Path(".state/compare_cities_chunks")
+DEFAULT_OUTPUT_CSV = Path("tmp/all_tatorter_hilliness.csv")
+PREVIEW_ROWS = 12
 
 
 @dataclass
@@ -74,7 +71,28 @@ class CityPlan:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare hilliness metrics for a small set of Swedish tatorter."
+        description="Compare hilliness metrics for Swedish tatorter."
+    )
+    parser.add_argument(
+        "--tatort",
+        action="append",
+        help="Optional tatort name filter. Can be passed multiple times. Defaults to all tatorter.",
+    )
+    parser.add_argument(
+        "--kommun",
+        action="append",
+        help="Optional kommun name filter. Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Optional limit after filtering, useful for trial runs.",
+    )
+    parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Optional starting offset after filtering, useful for resuming in batches.",
     )
     parser.add_argument(
         "--cache-budget-mb",
@@ -112,6 +130,17 @@ def parse_args() -> argparse.Namespace:
         "--chunk-root",
         default=str(DEFAULT_CHUNK_ROOT),
         help="Directory used to persist processed elevation chunks for resumable runs.",
+    )
+    parser.add_argument(
+        "--output-csv",
+        default=str(DEFAULT_OUTPUT_CSV),
+        help="CSV path for the full result set.",
+    )
+    parser.add_argument(
+        "--top-n-table",
+        type=int,
+        default=20,
+        help="How many rows to show in the final Rich table.",
     )
     return parser.parse_args()
 
@@ -194,11 +223,30 @@ def cached_tile_is_valid(cache_dir: Path, tile, tile_row) -> bool:
     return path.exists() and path.stat().st_size == tile.size_bytes
 
 
-def build_city_plans(cache_budget_mb: int) -> list[CityPlan]:
+def select_tatorter(args: argparse.Namespace):
+    cities = load_all_tatorter()
+    if args.tatort:
+        tatort_filter = set(args.tatort)
+        cities = cities.loc[cities["tatort"].isin(tatort_filter)].copy()
+    if args.kommun:
+        kommun_filter = set(args.kommun)
+        cities = cities.loc[cities["kommunnamn"].isin(kommun_filter)].copy()
+    if args.offset:
+        cities = cities.iloc[args.offset :].copy()
+    if args.limit is not None:
+        cities = cities.iloc[: args.limit].copy()
+    if cities.empty:
+        raise ValueError("No tatorter matched the current filters.")
+    return cities.sort_values(["tatort", "kommunnamn"]).reset_index(drop=True)
+
+
+def build_city_plans(cities, cache_budget_mb: int) -> list[CityPlan]:
     plans: list[CityPlan] = []
     cache_budget_bytes = cache_budget_mb * 1024 * 1024
-    for tatort_name, kommun_name in DEFAULT_CITIES:
-        tatort = load_tatort(tatort_name, kommun_name)
+    for _, row in cities.iterrows():
+        tatort_name = row["tatort"]
+        kommun_name = row["kommunnamn"]
+        tatort = cities.loc[[row.name]].copy()
         collections = find_covering_collections(tatort)
         tiles = fetch_intersecting_tiles(tatort, collections)
         batches = plan_batches(tiles, cache_budget_bytes)
@@ -206,7 +254,7 @@ def build_city_plans(cache_budget_mb: int) -> list[CityPlan]:
             CityPlan(
                 tatort=tatort_name,
                 kommun=kommun_name,
-                tatortskod=str(tatort.iloc[0]["tatortskod"]),
+                tatortskod=str(row["tatortskod"]),
                 collections=collections,
                 tiles=tiles,
                 batches=batches,
@@ -214,6 +262,140 @@ def build_city_plans(cache_budget_mb: int) -> list[CityPlan]:
             )
         )
     return plans
+
+
+def build_city_plans_with_progress(cities, cache_budget_mb: int, console: Console) -> list[CityPlan]:
+    plans: list[CityPlan] = []
+    cache_budget_bytes = cache_budget_mb * 1024 * 1024
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Preparing nationwide plan", total=len(cities))
+        for _, row in cities.iterrows():
+            tatort_name = row["tatort"]
+            kommun_name = row["kommunnamn"]
+            progress.update(task, description=f"Preparing {tatort_name} ({kommun_name})")
+            tatort = cities.loc[[row.name]].copy()
+            collections = find_covering_collections(tatort)
+            tiles = fetch_intersecting_tiles(tatort, collections)
+            batches = plan_batches(tiles, cache_budget_bytes)
+            plans.append(
+                CityPlan(
+                    tatort=tatort_name,
+                    kommun=kommun_name,
+                    tatortskod=str(row["tatortskod"]),
+                    collections=collections,
+                    tiles=tiles,
+                    batches=batches,
+                    total_bytes=sum(tile.size_bytes for tile in tiles),
+                )
+            )
+            progress.advance(task)
+    return plans
+
+
+def print_preflight(console: Console, plans: list[CityPlan], args: argparse.Namespace, state: StateStore) -> None:
+    total_raw_bytes = sum(plan.total_bytes for plan in plans)
+    total_estimated_seconds = sum(
+        estimate_download_seconds(plan.total_bytes, args.download_rate_mbps)
+        + estimate_processing_seconds(len(plan.tiles), args.processing_seconds_per_tile)
+        for plan in plans
+    )
+    completed_count = sum(
+        1 for plan in plans if state.final_summary_for_city(plan.tatort, plan.kommun) is not None
+    )
+
+    summary = Table(title="Nationwide Processing Summary")
+    summary.add_column("Selected", justify="right")
+    summary.add_column("Completed", justify="right")
+    summary.add_column("Raw Size", justify="right")
+    summary.add_column("Est. Time", justify="right")
+    summary.add_row(
+        str(len(plans)),
+        str(completed_count),
+        format_mb(total_raw_bytes),
+        format_seconds(total_estimated_seconds),
+    )
+    console.print(summary)
+    console.print()
+
+    preview = Table(title="Preflight Preview")
+    preview.add_column("Tatort")
+    preview.add_column("Kommun")
+    preview.add_column("Tiles", justify="right")
+    preview.add_column("Batches", justify="right")
+    preview.add_column("Raw Size", justify="right")
+    preview.add_column("Resume", justify="right")
+    for plan in plans[:PREVIEW_ROWS]:
+        preview.add_row(
+            plan.tatort,
+            plan.kommun,
+            str(len(plan.tiles)),
+            str(len(plan.batches)),
+            format_mb(plan.total_bytes),
+            "done" if state.final_summary_for_city(plan.tatort, plan.kommun) is not None else "pending",
+        )
+    console.print(preview)
+    if len(plans) > PREVIEW_ROWS:
+        console.print(f"... {len(plans) - PREVIEW_ROWS} more tatorter not shown in the preview.")
+    console.print()
+
+
+def write_results_csv(output_path: Path, results: list[dict[str, float | int | str]]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "rank",
+        "tatort",
+        "kommun",
+        "tatortskod",
+        "collections",
+        "batches",
+        "total_raw_size_mb",
+        "tiles_scanned",
+        "tiles_used",
+        "min_altitude_m",
+        "min_coord_lat_lon",
+        "max_altitude_m",
+        "max_coord_lat_lon",
+        "altitude_range_m",
+        "relief_q05_m",
+        "relief_q95_m",
+        "normalized_relief",
+        "rms_slope_deg",
+        "hilliness_score",
+    ]
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for index, row in enumerate(results, start=1):
+            writer.writerow(
+                {
+                    "rank": index,
+                    "tatort": row["tatort"],
+                    "kommun": row["kommun"],
+                    "tatortskod": row["tatortskod"],
+                    "collections": row["collections"],
+                    "batches": row["batches"],
+                    "total_raw_size_mb": f"{float(row['total_raw_size_mb']):.2f}",
+                    "tiles_scanned": row["tiles_scanned"],
+                    "tiles_used": row["tiles_used"],
+                    "min_altitude_m": f"{float(row['min_altitude_m']):.2f}",
+                    "min_coord_lat_lon": format_coord(row["min_coord_3006"]),
+                    "max_altitude_m": f"{float(row['max_altitude_m']):.2f}",
+                    "max_coord_lat_lon": format_coord(row["max_coord_3006"]),
+                    "altitude_range_m": f"{float(row['altitude_range_m']):.2f}",
+                    "relief_q05_m": f"{float(row['relief_q05_m']):.2f}",
+                    "relief_q95_m": f"{float(row['relief_q95_m']):.2f}",
+                    "normalized_relief": f"{float(row['normalized_relief']):.4f}",
+                    "rms_slope_deg": f"{float(row['rms_slope_deg']):.4f}",
+                    "hilliness_score": f"{float(row['hilliness_score']):.4f}",
+                }
+            )
 
 
 def main() -> int:
@@ -226,36 +408,15 @@ def main() -> int:
     results: list[dict[str, float | int | str]] = []
 
     try:
-        plans = build_city_plans(args.cache_budget_mb)
-        preflight = Table(title="City Processing Estimates")
-        preflight.add_column("Tatort")
-        preflight.add_column("Kommun")
-        preflight.add_column("Tiles", justify="right")
-        preflight.add_column("Batches", justify="right")
-        preflight.add_column("Raw Size", justify="right")
-        preflight.add_column("Est. Time", justify="right")
-        preflight.add_column("Resume", justify="right")
+        selected_cities = select_tatorter(args)
+        plans = build_city_plans_with_progress(selected_cities, args.cache_budget_mb, console)
         for plan in plans:
             state.register_city_plan(plan, plan.tatortskod)
-            completed_summary = state.final_summary_for_city(plan.tatort, plan.kommun)
-            resume_status = "done" if completed_summary is not None else "pending"
-            estimate_seconds = estimate_download_seconds(plan.total_bytes, args.download_rate_mbps) + estimate_processing_seconds(
-                len(plan.tiles), args.processing_seconds_per_tile
-            )
-            preflight.add_row(
-                plan.tatort,
-                plan.kommun,
-                str(len(plan.tiles)),
-                str(len(plan.batches)),
-                format_mb(plan.total_bytes),
-                format_seconds(estimate_seconds),
-                resume_status,
-            )
-        console.print(preflight)
-        console.print()
+        print_preflight(console, plans, args, state)
         console.print(f"State DB: {Path(args.state_db)}")
         console.print(f"Chunk root: {Path(args.chunk_root)}")
         console.print(f"Cache root: {work_root}")
+        console.print(f"Output CSV: {Path(args.output_csv)}")
         console.print()
 
         current_download_rate_mbps = args.download_rate_mbps
@@ -443,7 +604,7 @@ def main() -> int:
 
     results.sort(key=lambda row: float(row["hilliness_score"]), reverse=True)
 
-    table = Table(title="City Hilliness Comparison")
+    table = Table(title="Tatort Hilliness Comparison")
     table.add_column("Rank", justify="right")
     table.add_column("Tatort")
     table.add_column("Kommun")
@@ -457,7 +618,7 @@ def main() -> int:
     table.add_column("RMS Slope", justify="right")
     table.add_column("Score", justify="right")
 
-    for index, row in enumerate(results, start=1):
+    for index, row in enumerate(results[: args.top_n_table], start=1):
         table.add_row(
             str(index),
             str(row["tatort"]),
@@ -475,13 +636,18 @@ def main() -> int:
 
     console.print()
     console.print(table)
+    if len(results) > args.top_n_table:
+        console.print(f"Showing top {args.top_n_table} of {len(results)} tatorter.")
     console.print()
-    for row in results:
+    for row in results[: min(10, len(results))]:
         console.print(
             f"{row['tatort']}: {row['collections']} | "
             f"{int(row['tiles_scanned'])} tiles scanned | "
             f"{float(row['total_raw_size_mb']):.2f} MB raw"
         )
+    write_results_csv(Path(args.output_csv), results)
+    console.print()
+    console.print(f"Wrote full results to {Path(args.output_csv)}")
 
     return 0
 

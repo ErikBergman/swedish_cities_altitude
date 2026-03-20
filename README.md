@@ -62,22 +62,24 @@ The summary script will:
 - compute RMS slope in degrees
 - report a combined hilliness score
 
-Compare Lund, Malmö, Helsingborg, and Kristianstad with Rich progress and tables:
+Run the nationwide comparison with Rich progress and resumable checkpoints:
 
 ```bash
-python compare_cities.py --cache-budget-mb 1024
+python compare_cities.py --cache-budget-mb 5000
 ```
 
 The comparison script will:
 
 - authenticate once with the Lantmäteriet DEM service
-- discover and download each city's tiles in bounded batches
-- process each city incrementally without keeping all tiles permanently
+- select all Swedish tätorter by default
+- discover and download each tätort's tiles in bounded batches
+- process each tätort incrementally without keeping all tiles permanently
 - checkpoint progress in `./.state/compare_cities.sqlite`
 - persist per-tile elevation chunks in `./.state/compare_cities_chunks`
-- resume cleanly after interruption without redoing completed cities or tiles
+- resume cleanly after interruption without redoing completed tätorter or tiles
 - show a Rich progress bar with rolling ETAs during processing
-- print a Rich comparison table ranked by hilliness score
+- print a top-ranked summary table in the terminal
+- write the full result set to `./tmp/all_tatorter_hilliness.csv`
 
 You can override the checkpoint locations if needed:
 
@@ -86,4 +88,12 @@ python compare_cities.py \
   --state-db ./tmp/compare_cities.sqlite \
   --chunk-root ./tmp/compare_cities_chunks \
   --work-root ./tmp/compare_cities_cache
+```
+
+You can also run filtered subsets for testing:
+
+```bash
+python compare_cities.py --tatort Lund --tatort Malmö
+python compare_cities.py --kommun Stockholm --limit 25
+python compare_cities.py --offset 500 --limit 100
 ```

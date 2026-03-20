@@ -24,9 +24,18 @@ try:
     )
     from rich.table import Table
 except ModuleNotFoundError as error:
-    raise SystemExit(
-        "Error: rich is not installed in this environment. Run `python -m pip install -r requirements.txt`."
-    ) from error
+    Console = None  # type: ignore[assignment]
+    Progress = None  # type: ignore[assignment]
+    SpinnerColumn = None  # type: ignore[assignment]
+    BarColumn = None  # type: ignore[assignment]
+    TaskProgressColumn = None  # type: ignore[assignment]
+    TextColumn = None  # type: ignore[assignment]
+    TimeElapsedColumn = None  # type: ignore[assignment]
+    TimeRemainingColumn = None  # type: ignore[assignment]
+    Table = None  # type: ignore[assignment]
+    RICH_IMPORT_ERROR = error
+else:
+    RICH_IMPORT_ERROR = None
 
 from check_lund_access import (
     DEFAULT_CACHE_BUDGET_MB,
@@ -144,6 +153,13 @@ def parse_args() -> argparse.Namespace:
         help="How many rows to show in the final Rich table.",
     )
     return parser.parse_args()
+
+
+def require_rich() -> None:
+    if RICH_IMPORT_ERROR is not None:
+        raise SystemExit(
+            "Error: rich is not installed in this environment. Run `python -m pip install -r requirements.txt`."
+        ) from RICH_IMPORT_ERROR
 
 
 def slugify(name: str) -> str:
@@ -430,6 +446,7 @@ def write_results_csv(output_path: Path, results: list[dict[str, float | int | s
 
 def main() -> int:
     args = parse_args()
+    require_rich()
     console = Console()
     username, password = require_credentials()
     work_root = Path(args.work_root) if args.work_root else DEFAULT_WORK_ROOT

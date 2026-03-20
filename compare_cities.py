@@ -30,6 +30,7 @@ except ModuleNotFoundError as error:
 
 from check_lund_access import (
     DEFAULT_CACHE_BUDGET_MB,
+    TileInfo,
     fetch_intersecting_tiles,
     find_covering_collections,
     format_mb,
@@ -264,7 +265,30 @@ def build_city_plans(cities, cache_budget_mb: int) -> list[CityPlan]:
     return plans
 
 
-def build_city_plans_with_progress(cities, cache_budget_mb: int, console: Console) -> list[CityPlan]:
+def city_plan_from_state(row, cache_budget_mb: int) -> CityPlan:
+    tiles = [
+        TileInfo(
+            item_id=tile_row["item_id"],
+            collection_id=tile_row["collection_id"],
+            href=tile_row["href"],
+            size_bytes=int(tile_row["size_bytes"]),
+            bbox_3006=(0.0, 0.0, 0.0, 0.0),
+        )
+        for tile_row in row["tile_rows"]
+    ]
+    batches = plan_batches(tiles, cache_budget_mb * 1024 * 1024)
+    return CityPlan(
+        tatort=row["tatort"],
+        kommun=row["kommun"],
+        tatortskod=row["tatortskod"],
+        collections=list(row["collections"]),
+        tiles=tiles,
+        batches=batches,
+        total_bytes=int(row["total_bytes"]),
+    )
+
+
+def build_city_plans_with_progress(cities, cache_budget_mb: int, console: Console, state: StateStore) -> list[CityPlan]:
     plans: list[CityPlan] = []
     cache_budget_bytes = cache_budget_mb * 1024 * 1024
     with Progress(
@@ -280,21 +304,27 @@ def build_city_plans_with_progress(cities, cache_budget_mb: int, console: Consol
             tatort_name = row["tatort"]
             kommun_name = row["kommunnamn"]
             progress.update(task, description=f"Preparing {tatort_name} ({kommun_name})")
+            cached_plan = state.plan_metadata_for_city(tatort_name, kommun_name)
+            if cached_plan is not None:
+                plans.append(city_plan_from_state(cached_plan, cache_budget_mb))
+                progress.advance(task)
+                continue
+
             tatort = cities.loc[[row.name]].copy()
             collections = find_covering_collections(tatort)
             tiles = fetch_intersecting_tiles(tatort, collections)
             batches = plan_batches(tiles, cache_budget_bytes)
-            plans.append(
-                CityPlan(
-                    tatort=tatort_name,
-                    kommun=kommun_name,
-                    tatortskod=str(row["tatortskod"]),
-                    collections=collections,
-                    tiles=tiles,
-                    batches=batches,
-                    total_bytes=sum(tile.size_bytes for tile in tiles),
-                )
+            plan = CityPlan(
+                tatort=tatort_name,
+                kommun=kommun_name,
+                tatortskod=str(row["tatortskod"]),
+                collections=collections,
+                tiles=tiles,
+                batches=batches,
+                total_bytes=sum(tile.size_bytes for tile in tiles),
             )
+            state.register_city_plan(plan, plan.tatortskod)
+            plans.append(plan)
             progress.advance(task)
     return plans
 
@@ -409,9 +439,7 @@ def main() -> int:
 
     try:
         selected_cities = select_tatorter(args)
-        plans = build_city_plans_with_progress(selected_cities, args.cache_budget_mb, console)
-        for plan in plans:
-            state.register_city_plan(plan, plan.tatortskod)
+        plans = build_city_plans_with_progress(selected_cities, args.cache_budget_mb, console, state)
         print_preflight(console, plans, args, state)
         console.print(f"State DB: {Path(args.state_db)}")
         console.print(f"Chunk root: {Path(args.chunk_root)}")

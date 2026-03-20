@@ -76,6 +76,7 @@ The comparison script will:
 - process each tätort incrementally without keeping all tiles permanently
 - checkpoint progress in `./.state/compare_cities.sqlite`
 - persist per-tile elevation chunks in `./.state/compare_cities_chunks`
+- persist the discovered per-tätort tile plan in SQLite so STAC preflight does not need to be rebuilt on every restart
 - resume cleanly after interruption without redoing completed tätorter or tiles
 - show a Rich progress bar with rolling ETAs during processing
 - print a top-ranked summary table in the terminal

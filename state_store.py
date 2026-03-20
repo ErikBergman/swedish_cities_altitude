@@ -217,6 +217,34 @@ class StateStore:
             "hilliness_score": row["hilliness_score"],
         }
 
+    def plan_metadata_for_city(self, tatort: str, kommun: str) -> dict[str, Any] | None:
+        run_row = self.connection.execute(
+            "SELECT * FROM city_runs WHERE tatort = ? AND kommun = ?",
+            (tatort, kommun),
+        ).fetchone()
+        if run_row is None:
+            return None
+        tile_rows = self.connection.execute(
+            """
+            SELECT *
+            FROM city_tiles
+            WHERE tatort = ? AND kommun = ?
+            ORDER BY batch_index, batch_position
+            """,
+            (tatort, kommun),
+        ).fetchall()
+        if not tile_rows:
+            return None
+        return {
+            "tatort": run_row["tatort"],
+            "kommun": run_row["kommun"],
+            "tatortskod": run_row["tatortskod"],
+            "collections": json.loads(run_row["collections_json"]),
+            "total_tiles": run_row["total_tiles"],
+            "total_bytes": run_row["total_bytes"],
+            "tile_rows": tile_rows,
+        }
+
     def tile_row_map(self, tatort: str, kommun: str) -> dict[str, sqlite3.Row]:
         rows = self.connection.execute(
             "SELECT * FROM city_tiles WHERE tatort = ? AND kommun = ?",

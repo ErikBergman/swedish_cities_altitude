@@ -431,7 +431,16 @@ def main() -> int:
 
     console.print("Opening plot window...")
     figure, axes = plt.subplots(3, 3, figsize=(14, 10), sharex=True, sharey=True)
-    figure.suptitle("Tatort Altitude Character Profiles", fontsize=16)
+    figure.suptitle("Tatort Altitude Character Profiles", fontsize=16, y=0.98)
+    figure.text(
+        0.5,
+        0.945,
+        "Dark blue line: median projected elevation profile. Light blue band: 10th-90th percentile elevation range across each slice.",
+        ha="center",
+        va="top",
+        fontsize=10,
+        color="#0f4c5c",
+    )
 
     for row_index, profile_row in enumerate(profiles_by_row):
         for col_index, profile in enumerate(profile_row):
@@ -463,7 +472,7 @@ def main() -> int:
             if row_index == 2:
                 axis.set_xlabel("Projected city span")
 
-    plt.tight_layout()
+    plt.tight_layout(rect=(0, 0, 1, 0.9))
     plt.show()
     return 0
 

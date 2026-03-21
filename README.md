@@ -97,4 +97,6 @@ You can also run filtered subsets for testing:
 python compare_cities.py --tatort Lund --tatort Malmö
 python compare_cities.py --kommun Stockholm --limit 25
 python compare_cities.py --offset 500 --limit 100
+python compare_cities.py --min-population 10000
+python compare_cities.py --min-population 10000 --max-population 50000
 ```

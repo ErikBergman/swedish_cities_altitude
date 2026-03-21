@@ -99,6 +99,16 @@ def parse_args() -> argparse.Namespace:
         help="Optional limit after filtering, useful for trial runs.",
     )
     parser.add_argument(
+        "--min-population",
+        type=int,
+        help="Optional minimum population filter using the GeoPackage 'bef' field.",
+    )
+    parser.add_argument(
+        "--max-population",
+        type=int,
+        help="Optional maximum population filter using the GeoPackage 'bef' field.",
+    )
+    parser.add_argument(
         "--offset",
         type=int,
         default=0,
@@ -248,6 +258,10 @@ def select_tatorter(args: argparse.Namespace):
     if args.kommun:
         kommun_filter = set(args.kommun)
         cities = cities.loc[cities["kommunnamn"].isin(kommun_filter)].copy()
+    if args.min_population is not None:
+        cities = cities.loc[cities["bef"] >= args.min_population].copy()
+    if args.max_population is not None:
+        cities = cities.loc[cities["bef"] <= args.max_population].copy()
     if args.offset:
         cities = cities.iloc[args.offset :].copy()
     if args.limit is not None:

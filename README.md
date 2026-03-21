@@ -100,3 +100,17 @@ python compare_cities.py --offset 500 --limit 100
 python compare_cities.py --min-population 10000
 python compare_cities.py --min-population 10000 --max-population 50000
 ```
+
+Show a popup 3x3 grid of silhouette-style city profiles using the ranked CSV:
+
+```bash
+python show_city_character_grid.py
+```
+
+The viewer will:
+
+- read the ranked CSV from `./tmp/all_tatorter_hilliness.csv`
+- select the top 3, middle 3, and bottom 3 rows from that table
+- use the stored SQLite plan to fetch the needed DEM tiles for those cities
+- project each city's terrain onto a single horizontal axis
+- open a popup window with a shared y-axis across all subplots

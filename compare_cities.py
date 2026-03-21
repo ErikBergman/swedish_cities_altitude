@@ -477,12 +477,14 @@ def main() -> int:
             console=console,
         ) as progress:
             overall_task = progress.add_task("Comparing cities", total=len(plans))
+            city_task = progress.add_task("Current city", total=1.0, completed=0.0)
 
             for plan in plans:
                 completed_summary = state.final_summary_for_city(plan.tatort, plan.kommun)
                 if completed_summary is not None:
-                    city_task = progress.add_task(
-                        f"{plan.tatort}: already completed",
+                    progress.update(
+                        city_task,
+                        description=f"{plan.tatort}: already completed",
                         total=1.0,
                         completed=1.0,
                     )
@@ -493,9 +495,11 @@ def main() -> int:
                 estimated_city_seconds = estimate_download_seconds(plan.total_bytes, current_download_rate_mbps) + estimate_processing_seconds(
                     len(plan.tiles), current_processing_seconds_per_tile
                 )
-                city_task = progress.add_task(
-                    f"{plan.tatort}: estimated {format_seconds(estimated_city_seconds)}",
+                progress.update(
+                    city_task,
+                    completed=0.0,
                     total=max(estimated_city_seconds, 0.01),
+                    description=f"{plan.tatort}: estimated {format_seconds(estimated_city_seconds)}",
                 )
                 verify_asset_access(plan.tiles[0], username, password)
                 state.mark_city_status(plan.tatort, plan.kommun, "running")

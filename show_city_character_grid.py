@@ -431,10 +431,30 @@ def main() -> int:
 
     console.print("Opening plot window...")
     figure, axes = plt.subplots(3, 3, figsize=(14, 10), sharex=True, sharey=True)
-    figure.suptitle("Tatort Altitude Character Profiles", fontsize=16, y=0.98)
+    figure.suptitle("Tatort Altitude Character Profiles", fontsize=16, y=0.985)
     figure.text(
         0.5,
-        0.945,
+        0.958,
+        "Each panel compresses one city's terrain into a side-view style shape, so you can compare whether a city is broadly flat, valley-like, or split into several higher and lower parts.",
+        ha="center",
+        va="top",
+        fontsize=12,
+        color="#0f172a",
+        wrap=True,
+    )
+    figure.text(
+        0.5,
+        0.932,
+        "Technical summary: DEM pixels inside each tatort polygon are projected onto the city's major axis, grouped into bins along that span, and summarized by percentiles per bin.",
+        ha="center",
+        va="top",
+        fontsize=8.5,
+        color="#475569",
+        wrap=True,
+    )
+    figure.text(
+        0.5,
+        0.908,
         "Dark blue line: median projected elevation profile. Light blue band: 10th-90th percentile elevation range across each slice.",
         ha="center",
         va="top",
@@ -472,7 +492,7 @@ def main() -> int:
             if row_index == 2:
                 axis.set_xlabel("Projected city span")
 
-    plt.tight_layout(rect=(0, 0, 1, 0.9))
+    plt.tight_layout(rect=(0, 0, 1, 0.86))
     plt.show()
     return 0
 

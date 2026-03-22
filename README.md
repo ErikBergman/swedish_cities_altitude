@@ -113,4 +113,12 @@ The viewer will:
 - select the top 3, middle 3, and bottom 3 rows from that table
 - use the stored SQLite plan to fetch the needed DEM tiles for those cities
 - project each city's terrain onto a single horizontal axis
+- store computed profile curves under `./.cache/profile_views/profiles`
+- reuse those cached profiles on later runs when the city selection and profile settings are unchanged
 - open a popup window with a shared y-axis across all subplots
+
+If you want to keep the raw downloaded `.tif` files too, add:
+
+```bash
+python show_city_character_grid.py --keep-cache
+```

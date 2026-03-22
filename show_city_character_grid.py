@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import shutil
 import sys
@@ -13,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from rasterio.mask import mask
+from rasterio.errors import RasterioIOError
 
 try:
     import matplotlib.pyplot as plt
@@ -41,6 +43,7 @@ DEFAULT_CACHE_ROOT = Path(".cache/profile_views")
 DEFAULT_BINS = 120
 DEFAULT_TILE_SAMPLE_LIMIT = 12000
 ROW_LABELS = ["Top 3", "Middle 3", "Bottom 3"]
+PROFILE_CACHE_DIRNAME = "profiles"
 
 
 @dataclass
@@ -180,6 +183,27 @@ def profile_cache_dir(cache_root: Path, city: RankedCity) -> Path:
     path = cache_root / safe_name
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def profile_cache_root(cache_root: Path) -> Path:
+    path = cache_root / PROFILE_CACHE_DIRNAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def profile_cache_key(city: RankedCity, bins: int, tile_sample_limit: int) -> str:
+    base = f"{city.rank}_{city.tatort}_{city.kommun}_{bins}_{tile_sample_limit}"
+    safe = base.lower().replace(" ", "_")
+    return (
+        safe.replace("å", "a")
+        .replace("ä", "a")
+        .replace("ö", "o")
+        .replace("/", "_")
+    )
+
+
+def profile_cache_path(cache_root: Path, city: RankedCity, bins: int, tile_sample_limit: int) -> Path:
+    return profile_cache_root(cache_root) / f"{profile_cache_key(city, bins, tile_sample_limit)}.json"
 
 
 def major_axis_for_geometry(geometry) -> tuple[np.ndarray, np.ndarray]:
@@ -331,6 +355,26 @@ def accumulate_tile_bins(
             bin_values[int(index)].append(float(value))
 
 
+def ensure_valid_tile(
+    tile: TileInfo,
+    destination: Path,
+    username: str,
+    password: str,
+    progress: Progress,
+    city_task: TaskID,
+) -> None:
+    download_tile(tile, destination, username, password, quiet=True)
+    try:
+        with rasterio.open(destination):
+            return
+    except RasterioIOError:
+        progress.update(city_task, description=f"Re-downloading corrupt tile {destination.name}")
+        destination.unlink(missing_ok=True)
+        download_tile(tile, destination, username, password, quiet=True)
+        with rasterio.open(destination):
+            return
+
+
 def build_profile_for_city(
     city: RankedCity,
     state: StateStore,
@@ -357,7 +401,7 @@ def build_profile_for_city(
     for tile in tiles:
         progress.update(city_task, description=f"{city.tatort}: downloading {target_filename(tile.href)}")
         destination = cache_dir / target_filename(tile.href)
-        download_tile(tile, destination, username, password, quiet=True)
+        ensure_valid_tile(tile, destination, username, password, progress, city_task)
         progress.advance(city_task)
 
     bin_values: list[list[float]] = [[] for _ in range(bins)]
@@ -439,6 +483,49 @@ def add_shape_inset(axis, profile: ProfileData) -> None:
         spine.set_alpha(0.35)
 
 
+def save_profile_cache(path: Path, profile: ProfileData) -> None:
+    payload = {
+        "rank": profile.city.rank,
+        "tatort": profile.city.tatort,
+        "kommun": profile.city.kommun,
+        "score": profile.city.score,
+        "x": profile.x.tolist(),
+        "p10": profile.p10.tolist(),
+        "p50": profile.p50.tolist(),
+        "p90": profile.p90.tolist(),
+        "y_min": profile.y_min,
+        "y_max": profile.y_max,
+        "width_km": profile.width_km,
+        "outline_segments": [segment.tolist() for segment in profile.outline_segments],
+        "view_axis_segment": profile.view_axis_segment.tolist(),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def load_profile_cache(path: Path) -> ProfileData:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    city = RankedCity(
+        rank=int(payload["rank"]),
+        tatort=payload["tatort"],
+        kommun=payload["kommun"],
+        score=float(payload["score"]),
+    )
+    return ProfileData(
+        city=city,
+        x=np.asarray(payload["x"], dtype="float64"),
+        p10=np.asarray(payload["p10"], dtype="float64"),
+        p50=np.asarray(payload["p50"], dtype="float64"),
+        p90=np.asarray(payload["p90"], dtype="float64"),
+        y_min=float(payload["y_min"]),
+        y_max=float(payload["y_max"]),
+        width_km=float(payload["width_km"]),
+        outline_segments=[
+            np.asarray(segment, dtype="float64") for segment in payload["outline_segments"]
+        ],
+        view_axis_segment=np.asarray(payload["view_axis_segment"], dtype="float64"),
+    )
+
+
 def main() -> int:
     args = parse_args()
     console = Console()
@@ -477,6 +564,26 @@ def main() -> int:
                     if city is None:
                         profile_row.append(None)
                         continue
+                    cached_profile_path = profile_cache_path(
+                        cache_root,
+                        city,
+                        bins=args.bins,
+                        tile_sample_limit=args.tile_sample_limit,
+                    )
+                    if cached_profile_path.exists():
+                        progress.update(
+                            city_task,
+                            description=f"{city.tatort} ({city.kommun}) | loading cached profile",
+                            total=1,
+                            completed=1,
+                        )
+                        profile = load_profile_cache(cached_profile_path)
+                        profile_row.append(profile)
+                        global_min = min(global_min, profile.y_min)
+                        global_max = max(global_max, profile.y_max)
+                        progress.advance(overall_task)
+                        continue
+
                     tile_count = len(tile_info_list_from_state(state, city.tatort, city.kommun))
                     progress.update(
                         city_task,
@@ -499,6 +606,7 @@ def main() -> int:
                         progress=progress,
                         city_task=city_task,
                     )
+                    save_profile_cache(cached_profile_path, profile)
                     profile_row.append(profile)
                     global_min = min(global_min, profile.y_min)
                     global_max = max(global_max, profile.y_max)

@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 import os
-import sys
 import tempfile
+import sys
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
@@ -86,21 +86,35 @@ def download_tile(
 
     opener = build_auth_opener(username, password, tile.href)
     request = urllib.request.Request(tile.href, method="GET")
-    with opener.open(request, timeout=120) as response, destination.open("wb") as output:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            output.write(chunk)
-            if progress_callback is not None:
-                progress_callback(len(chunk))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=destination.parent,
+        prefix=f"{destination.name}.",
+        suffix=".part",
+        delete=False,
+    ) as temporary_file:
+        temp_path = Path(temporary_file.name)
 
-    downloaded_size = destination.stat().st_size
-    if downloaded_size != tile.size_bytes:
-        raise RuntimeError(
-            f"Downloaded size mismatch for {destination.name}: "
-            f"expected {tile.size_bytes}, got {downloaded_size}."
-        )
+    try:
+        with opener.open(request, timeout=120) as response, temp_path.open("wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                if progress_callback is not None:
+                    progress_callback(len(chunk))
+
+        downloaded_size = temp_path.stat().st_size
+        if downloaded_size != tile.size_bytes:
+            raise RuntimeError(
+                f"Downloaded size mismatch for {destination.name}: "
+                f"expected {tile.size_bytes}, got {downloaded_size}."
+            )
+        temp_path.replace(destination)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
 
     if not quiet:
         print(f"Downloaded {destination.name} ({format_mb(tile.size_bytes)})")

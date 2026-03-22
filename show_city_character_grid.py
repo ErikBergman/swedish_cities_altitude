@@ -61,6 +61,8 @@ class ProfileData:
     y_min: float
     y_max: float
     width_km: float
+    outline_segments: list[np.ndarray]
+    view_axis_segment: np.ndarray
 
 
 def parse_args() -> argparse.Namespace:
@@ -199,6 +201,55 @@ def major_axis_for_geometry(geometry) -> tuple[np.ndarray, np.ndarray]:
     return centroid, best_vector
 
 
+def normalize_point(point: np.ndarray, min_x: float, min_y: float, scale: float) -> np.ndarray:
+    return np.array(
+        [
+            (point[0] - min_x) / scale,
+            (point[1] - min_y) / scale,
+        ],
+        dtype="float64",
+    )
+
+
+def geometry_outline_segments(geometry, centroid: np.ndarray, axis: np.ndarray) -> tuple[list[np.ndarray], np.ndarray]:
+    min_x, min_y, max_x, max_y = geometry.bounds
+    scale = max(max_x - min_x, max_y - min_y, 1.0)
+
+    def exterior_segments() -> list[np.ndarray]:
+        polygons = list(geometry.geoms) if hasattr(geometry, "geoms") else [geometry]
+        segments: list[np.ndarray] = []
+        for polygon in polygons:
+            coords = np.asarray(polygon.exterior.coords, dtype="float64")
+            normalized = np.column_stack(
+                [
+                    (coords[:, 0] - min_x) / scale,
+                    (coords[:, 1] - min_y) / scale,
+                ]
+            )
+            segments.append(normalized)
+        return segments
+
+    centered_corners = np.asarray(
+        [
+            [min_x, min_y],
+            [min_x, max_y],
+            [max_x, min_y],
+            [max_x, max_y],
+        ],
+        dtype="float64",
+    ) - centroid
+    projection_extent = float(np.max(np.abs(centered_corners @ axis)))
+    start = centroid - axis * projection_extent
+    end = centroid + axis * projection_extent
+
+    return exterior_segments(), np.vstack(
+        [
+            normalize_point(start, min_x, min_y, scale),
+            normalize_point(end, min_x, min_y, scale),
+        ]
+    )
+
+
 def geometry_projection_bounds(geometry, centroid: np.ndarray, axis: np.ndarray) -> tuple[float, float]:
     boundary = geometry.boundary
     candidate_coords: list[tuple[float, float]] = []
@@ -296,6 +347,7 @@ def build_profile_for_city(
     geometry = tatort.geometry.iloc[0]
     geometry_interface = geometry.__geo_interface__
     centroid, axis = major_axis_for_geometry(geometry)
+    outline_segments, view_axis_segment = geometry_outline_segments(geometry, centroid, axis)
     projection_min, projection_max = geometry_projection_bounds(geometry, centroid, axis)
     width_km = max(projection_max - projection_min, 0.0) / 1000
 
@@ -355,7 +407,36 @@ def build_profile_for_city(
         y_min=float(np.nanmin(p10)),
         y_max=float(np.nanmax(p90)),
         width_km=width_km,
+        outline_segments=outline_segments,
+        view_axis_segment=view_axis_segment,
     )
+
+
+def add_shape_inset(axis, profile: ProfileData) -> None:
+    inset = axis.inset_axes([0.72, 0.6, 0.24, 0.3])
+    inset.set_facecolor((1.0, 1.0, 1.0, 0.9))
+    for segment in profile.outline_segments:
+        inset.plot(segment[:, 0], segment[:, 1], color="#64748b", linewidth=0.9)
+    inset.plot(
+        profile.view_axis_segment[:, 0],
+        profile.view_axis_segment[:, 1],
+        color="#dc2626",
+        linewidth=1.2,
+    )
+    inset.annotate(
+        "",
+        xy=profile.view_axis_segment[1],
+        xytext=profile.view_axis_segment[0],
+        arrowprops={"arrowstyle": "->", "color": "#dc2626", "lw": 1.2},
+    )
+    inset.set_xlim(-0.05, 1.05)
+    inset.set_ylim(-0.05, 1.05)
+    inset.set_aspect("equal", adjustable="box")
+    inset.set_xticks([])
+    inset.set_yticks([])
+    inset.set_title("Shape + view", fontsize=6, pad=1)
+    for spine in inset.spines.values():
+        spine.set_alpha(0.35)
 
 
 def main() -> int:
@@ -487,6 +568,7 @@ def main() -> int:
                 ha="left",
                 va="bottom",
             )
+            add_shape_inset(axis, profile)
             if col_index == 0:
                 axis.set_ylabel(f"{ROW_LABELS[row_index]}\nAltitude (m)")
             if row_index == 2:

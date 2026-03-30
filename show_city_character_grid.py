@@ -42,16 +42,16 @@ DEFAULT_CHUNK_ROOT = Path(".state/compare_cities_chunks")
 DEFAULT_CACHE_ROOT = Path(".cache/profile_views")
 DEFAULT_BINS = 120
 DEFAULT_TILE_SAMPLE_LIMIT = 12000
-ROW_LABELS = ["Top 3", "Middle 3", "Bottom 3"]
+DEFAULT_MAX_CITIES = 9
 PROFILE_CACHE_DIRNAME = "profiles"
 
 
 @dataclass
 class RankedCity:
-    rank: int
+    rank: int | None
     tatort: str
     kommun: str
-    score: float
+    score: float | None
 
 
 @dataclass
@@ -109,6 +109,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep the downloaded tile cache after plotting.",
     )
+    parser.add_argument(
+        "--max-cities",
+        type=int,
+        default=DEFAULT_MAX_CITIES,
+        help="Maximum number of cached cities that can be selected in the GUI.",
+    )
     return parser.parse_args()
 
 
@@ -129,31 +135,6 @@ def load_ranked_cities(csv_path: Path) -> list[RankedCity]:
         for row in rows
     ]
     return sorted(cities, key=lambda row: row.rank)
-
-
-def select_profile_groups(cities: list[RankedCity]) -> list[list[RankedCity | None]]:
-    total = len(cities)
-
-    def pad(group: list[RankedCity]) -> list[RankedCity | None]:
-        result: list[RankedCity | None] = list(group[:3])
-        while len(result) < 3:
-            result.append(None)
-        return result
-
-    top = pad(cities[:3])
-
-    if total <= 3:
-        middle_source: list[RankedCity] = []
-    else:
-        middle_start = max((total // 2) - 1, 0)
-        middle_end = min(middle_start + 3, total)
-        middle_source = cities[middle_start:middle_end]
-        if len(middle_source) < 3:
-            middle_source = cities[max(total - 3, 0):total]
-    middle = pad(middle_source)
-
-    bottom = pad(cities[-3:] if total > 3 else [])
-    return [top, middle, bottom]
 
 
 def tile_info_list_from_state(state: StateStore, tatort: str, kommun: str) -> list[TileInfo]:
@@ -461,17 +442,39 @@ def add_shape_inset(axis, profile: ProfileData) -> None:
     inset.set_facecolor((1.0, 1.0, 1.0, 0.9))
     for segment in profile.outline_segments:
         inset.plot(segment[:, 0], segment[:, 1], color="#64748b", linewidth=0.9)
+    raw_start = profile.view_axis_segment[0]
+    raw_end = profile.view_axis_segment[1]
+    vector = raw_end - raw_start
+    length = float(np.hypot(vector[0], vector[1]))
+    if length == 0:
+        direction = np.array([1.0, 0.0], dtype="float64")
+    else:
+        direction = vector / length
+    midpoint = (raw_start + raw_end) / 2.0
+    half_span = 0.32
+    start = midpoint - direction * half_span
+    end = midpoint + direction * half_span
     inset.plot(
-        profile.view_axis_segment[:, 0],
-        profile.view_axis_segment[:, 1],
+        [start[0], end[0]],
+        [start[1], end[1]],
         color="#dc2626",
-        linewidth=1.2,
+        linewidth=1.8,
+        zorder=5,
     )
     inset.annotate(
         "",
-        xy=profile.view_axis_segment[1],
-        xytext=profile.view_axis_segment[0],
-        arrowprops={"arrowstyle": "->", "color": "#dc2626", "lw": 1.2},
+        xy=end,
+        xytext=start,
+        arrowprops={
+            "arrowstyle": "-|>",
+            "color": "#dc2626",
+            "lw": 1.8,
+            "mutation_scale": 16,
+            "shrinkA": 0,
+            "shrinkB": 0,
+        },
+        zorder=6,
+        clip_on=True,
     )
     inset.set_xlim(-0.05, 1.05)
     inset.set_ylim(-0.05, 1.05)
@@ -505,10 +508,10 @@ def save_profile_cache(path: Path, profile: ProfileData) -> None:
 def load_profile_cache(path: Path) -> ProfileData:
     payload = json.loads(path.read_text(encoding="utf-8"))
     city = RankedCity(
-        rank=int(payload["rank"]),
+        rank=int(payload["rank"]) if payload["rank"] is not None else None,
         tatort=payload["tatort"],
         kommun=payload["kommun"],
-        score=float(payload["score"]),
+        score=float(payload["score"]) if payload["score"] is not None else None,
     )
     return ProfileData(
         city=city,
@@ -526,100 +529,147 @@ def load_profile_cache(path: Path) -> ProfileData:
     )
 
 
+def city_title(profile: ProfileData) -> str:
+    if profile.city.rank is not None and profile.city.score is not None:
+        return f"{profile.city.tatort}\nrank {profile.city.rank}, score {profile.city.score:.1f}"
+    return f"{profile.city.tatort}\ncustom selection"
+
+
+def list_cached_profiles(cache_root: Path, bins: int) -> list[ProfileData]:
+    profiles_dir = profile_cache_root(cache_root)
+    candidates = sorted(profiles_dir.glob("*.json"))
+    latest_by_city: dict[tuple[str, str], tuple[float, ProfileData]] = {}
+
+    for path in candidates:
+        try:
+            profile = load_profile_cache(path)
+        except Exception:
+            continue
+        if profile.x.size != bins:
+            continue
+        key = (profile.city.tatort, profile.city.kommun)
+        current = latest_by_city.get(key)
+        mtime = path.stat().st_mtime
+        if current is None or mtime > current[0]:
+            latest_by_city[key] = (mtime, profile)
+
+    profiles = [item[1] for item in latest_by_city.values()]
+    return sorted(
+        profiles,
+        key=lambda profile: (
+            profile.city.rank is None,
+            profile.city.rank if profile.city.rank is not None else 10**9,
+            profile.city.tatort.casefold(),
+            profile.city.kommun.casefold(),
+        ),
+    )
+
+
+def select_profiles_gui(cached_profiles: list[ProfileData], max_cities: int) -> list[ProfileData]:
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except ModuleNotFoundError as error:
+        raise SystemExit("Error: tkinter is not available in this environment.") from error
+
+    selected: list[ProfileData] = []
+    root = tk.Tk()
+    root.title("Select Cities")
+    root.geometry("520x420")
+
+    tk.Label(
+        root,
+        text=f"Select up to {max_cities} cached cities to include in the graph:",
+        anchor="w",
+    ).pack(fill="x", padx=12, pady=(12, 6))
+
+    frame = tk.Frame(root)
+    frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+    scrollbar = tk.Scrollbar(frame)
+    scrollbar.pack(side="right", fill="y")
+
+    listbox = tk.Listbox(
+        frame,
+        selectmode=tk.EXTENDED,
+        yscrollcommand=scrollbar.set,
+        exportselection=False,
+    )
+    listbox.pack(side="left", fill="both", expand=True)
+    scrollbar.config(command=listbox.yview)
+
+    for index, profile in enumerate(cached_profiles):
+        if profile.city.rank is not None and profile.city.score is not None:
+            label = (
+                f"{profile.city.tatort} ({profile.city.kommun}) | "
+                f"rank {profile.city.rank} | score {profile.city.score:.1f}"
+            )
+        else:
+            label = f"{profile.city.tatort} ({profile.city.kommun}) | cached"
+        listbox.insert(tk.END, label)
+        if index < min(3, len(cached_profiles)):
+            listbox.selection_set(index)
+
+    def on_ok() -> None:
+        indexes = listbox.curselection()
+        if not indexes:
+            messagebox.showwarning("No selection", "Select at least one city.")
+            return
+        if len(indexes) > max_cities:
+            messagebox.showwarning(
+                "Too many cities",
+                f"Select at most {max_cities} cities.",
+            )
+            return
+        selected.extend(cached_profiles[index] for index in indexes)
+        root.destroy()
+
+    def on_cancel() -> None:
+        root.destroy()
+
+    button_row = tk.Frame(root)
+    button_row.pack(fill="x", padx=12, pady=(0, 12))
+    tk.Button(button_row, text="Cancel", command=on_cancel).pack(side="right")
+    tk.Button(button_row, text="Open graph", command=on_ok).pack(side="right", padx=(0, 8))
+
+    root.mainloop()
+    if not selected:
+        raise SystemExit("No cities selected.")
+    return selected
+
+
 def main() -> int:
     args = parse_args()
     console = Console()
-    ranked_cities = load_ranked_cities(Path(args.csv))
-    groups = select_profile_groups(ranked_cities)
-    selected_cities = [city for group in groups for city in group if city is not None]
-    username, password = require_credentials()
-    state = StateStore(Path(args.state_db), Path(args.chunk_root))
     cache_root = Path(args.cache_root)
     cache_root.mkdir(parents=True, exist_ok=True)
+    cached_profiles = list_cached_profiles(cache_root, args.bins)
+    if not cached_profiles:
+        raise RuntimeError(
+            "No cached city profiles found. Run the viewer once with cached profiling enabled before using the selector."
+        )
 
-    console.print(f"Ranked CSV: {Path(args.csv)}")
-    console.print(f"Selected {len(selected_cities)} cities for the 3x3 grid:")
-    for city in selected_cities:
-        console.print(f"  rank {city.rank}: {city.tatort} ({city.kommun})")
-    console.print("Preparing terrain profiles...")
-
-    try:
-        profiles_by_row: list[list[ProfileData | None]] = []
-        global_min = math.inf
-        global_max = -math.inf
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TimeElapsedColumn(),
-            console=console,
-        ) as progress:
-            overall_task = progress.add_task("Preparing profile grid", total=len(selected_cities))
-            city_task = progress.add_task("Current city", total=1)
-
-            for group in groups:
-                profile_row: list[ProfileData | None] = []
-                for city in group:
-                    if city is None:
-                        profile_row.append(None)
-                        continue
-                    cached_profile_path = profile_cache_path(
-                        cache_root,
-                        city,
-                        bins=args.bins,
-                        tile_sample_limit=args.tile_sample_limit,
-                    )
-                    if cached_profile_path.exists():
-                        progress.update(
-                            city_task,
-                            description=f"{city.tatort} ({city.kommun}) | loading cached profile",
-                            total=1,
-                            completed=1,
-                        )
-                        profile = load_profile_cache(cached_profile_path)
-                        profile_row.append(profile)
-                        global_min = min(global_min, profile.y_min)
-                        global_max = max(global_max, profile.y_max)
-                        progress.advance(overall_task)
-                        continue
-
-                    tile_count = len(tile_info_list_from_state(state, city.tatort, city.kommun))
-                    progress.update(
-                        city_task,
-                        description=(
-                            f"{city.tatort} ({city.kommun}) | rank {city.rank} | "
-                            f"{tile_count} tiles"
-                        ),
-                        total=max(tile_count * 2, 1),
-                        completed=0,
-                    )
-                    profile = build_profile_for_city(
-                        city,
-                        state,
-                        cache_root,
-                        bins=args.bins,
-                        tile_sample_limit=args.tile_sample_limit,
-                        keep_cache=args.keep_cache,
-                        username=username,
-                        password=password,
-                        progress=progress,
-                        city_task=city_task,
-                    )
-                    save_profile_cache(cached_profile_path, profile)
-                    profile_row.append(profile)
-                    global_min = min(global_min, profile.y_min)
-                    global_max = max(global_max, profile.y_max)
-                    progress.advance(overall_task)
-                profiles_by_row.append(profile_row)
-    finally:
-        state.close()
+    selected_profiles = select_profiles_gui(cached_profiles, args.max_cities)
+    selected_profiles = selected_profiles[: args.max_cities]
+    global_min = min(profile.y_min for profile in selected_profiles)
+    global_max = max(profile.y_max for profile in selected_profiles)
 
     if not math.isfinite(global_min) or not math.isfinite(global_max):
         raise RuntimeError("Could not build any city profiles from the selected data.")
 
+    console.print(f"Loaded {len(cached_profiles)} cached city profiles.")
+    console.print(f"Selected {len(selected_profiles)} cities:")
+    for profile in selected_profiles:
+        if profile.city.rank is not None:
+            console.print(f"  rank {profile.city.rank}: {profile.city.tatort} ({profile.city.kommun})")
+        else:
+            console.print(f"  cached: {profile.city.tatort} ({profile.city.kommun})")
+
     console.print("Opening plot window...")
-    figure, axes = plt.subplots(3, 3, figsize=(14, 10), sharex=True, sharey=True)
+    columns = min(3, len(selected_profiles))
+    rows = math.ceil(len(selected_profiles) / columns)
+    figure, axes = plt.subplots(rows, columns, figsize=(4.8 * columns, 3.5 * rows), sharex=True, sharey=True)
+    axes_array = np.atleast_1d(axes).reshape(rows, columns)
     figure.suptitle("Tatort Altitude Character Profiles", fontsize=16, y=0.992)
     figure.text(
         0.5,
@@ -652,36 +702,35 @@ def main() -> int:
         wrap=True,
     )
 
-    for row_index, profile_row in enumerate(profiles_by_row):
-        for col_index, profile in enumerate(profile_row):
-            axis = axes[row_index, col_index]
-            if profile is None:
-                axis.axis("off")
-                continue
+    flat_axes = list(axes_array.flat)
+    for index, axis in enumerate(flat_axes):
+        if index >= len(selected_profiles):
+            axis.axis("off")
+            continue
 
-            axis.fill_between(profile.x, profile.p10, profile.p90, color="#b9d9eb", alpha=0.9)
-            axis.plot(profile.x, profile.p50, color="#0f4c5c", linewidth=2.0)
-            axis.set_ylim(global_min, global_max)
-            axis.set_xlim(0.0, 1.0)
-            axis.grid(alpha=0.2, linewidth=0.5)
-            axis.set_title(
-                f"{profile.city.tatort}\nrank {profile.city.rank}, score {profile.city.score:.1f}",
-                fontsize=10,
-            )
-            axis.text(
-                0.02,
-                0.04,
-                f"{profile.width_km:.1f} km span",
-                transform=axis.transAxes,
-                fontsize=8,
-                ha="left",
-                va="bottom",
-            )
-            add_shape_inset(axis, profile)
-            if col_index == 0:
-                axis.set_ylabel(f"{ROW_LABELS[row_index]}\nAltitude (m)")
-            if row_index == 2:
-                axis.set_xlabel("Projected city span")
+        profile = selected_profiles[index]
+        row_index = index // columns
+        col_index = index % columns
+        axis.fill_between(profile.x, profile.p10, profile.p90, color="#b9d9eb", alpha=0.9)
+        axis.plot(profile.x, profile.p50, color="#0f4c5c", linewidth=2.0)
+        axis.set_ylim(global_min, global_max)
+        axis.set_xlim(0.0, 1.0)
+        axis.grid(alpha=0.2, linewidth=0.5)
+        axis.set_title(city_title(profile), fontsize=10)
+        axis.text(
+            0.02,
+            0.04,
+            f"{profile.width_km:.1f} km span",
+            transform=axis.transAxes,
+            fontsize=8,
+            ha="left",
+            va="bottom",
+        )
+        add_shape_inset(axis, profile)
+        if col_index == 0:
+            axis.set_ylabel("Altitude (m)")
+        if row_index == rows - 1:
+            axis.set_xlabel("Projected city span")
 
     plt.tight_layout(rect=(0, 0, 1, 0.80))
     plt.show()

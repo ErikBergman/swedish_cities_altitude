@@ -109,10 +109,9 @@ python show_city_character_grid.py
 
 The viewer will:
 
-- read the ranked CSV from `./tmp/all_tatorter_hilliness.csv`
-- select the top 3, middle 3, and bottom 3 rows from that table
-- use the stored SQLite plan to fetch the needed DEM tiles for those cities
-- project each city's terrain onto a single horizontal axis
+- open a simple selector window
+- list cities that already have cached profile data
+- let you choose up to 9 cities to include in the graph
 - store computed profile curves under `./.cache/profile_views/profiles`
 - reuse those cached profiles on later runs when the city selection and profile settings are unchanged
 - open a popup window with a shared y-axis across all subplots

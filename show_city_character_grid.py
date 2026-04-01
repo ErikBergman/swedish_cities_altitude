@@ -784,6 +784,7 @@ def main() -> int:
             color="#0f4c5c",
             linewidth=0.8,
             alpha=0.2,
+            connectionstyle="arc3,rad=-0.18",
             zorder=1,
         )
         right_connector = ConnectionPatch(
@@ -796,6 +797,7 @@ def main() -> int:
             color="#0f4c5c",
             linewidth=0.8,
             alpha=0.2,
+            connectionstyle="arc3,rad=0.18",
             zorder=1,
         )
         figure.add_artist(left_connector)

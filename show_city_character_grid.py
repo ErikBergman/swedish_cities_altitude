@@ -18,6 +18,7 @@ from rasterio.errors import RasterioIOError
 
 try:
     import matplotlib.pyplot as plt
+    from matplotlib.patches import ConnectionPatch
 except ModuleNotFoundError as error:
     raise SystemExit(
         "Error: matplotlib is not installed in this environment. Run `python -m pip install -r requirements.txt`."
@@ -773,6 +774,32 @@ def main() -> int:
             linewidth=0.8,
             solid_capstyle="round",
         )
+        left_connector = ConnectionPatch(
+            xyA=(profile.x[0], profile.p50[0]),
+            coordsA="data",
+            xyB=(miniature_x[0], miniature_p50[0]),
+            coordsB="data",
+            axesA=profile_axis,
+            axesB=width_axis,
+            color="#0f4c5c",
+            linewidth=0.8,
+            alpha=0.2,
+            zorder=1,
+        )
+        right_connector = ConnectionPatch(
+            xyA=(profile.x[-1], profile.p50[-1]),
+            coordsA="data",
+            xyB=(miniature_x[-1], miniature_p50[-1]),
+            coordsB="data",
+            axesA=profile_axis,
+            axesB=width_axis,
+            color="#0f4c5c",
+            linewidth=0.8,
+            alpha=0.2,
+            zorder=1,
+        )
+        figure.add_artist(left_connector)
+        figure.add_artist(right_connector)
         width_axis.set_xticks([-max_half_span_km, 0.0, max_half_span_km])
         width_axis.set_xticklabels(
             [

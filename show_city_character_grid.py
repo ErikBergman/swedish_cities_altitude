@@ -664,6 +664,7 @@ def main() -> int:
     selected_profiles = selected_profiles[: args.max_cities]
     global_min = min(profile.y_min for profile in selected_profiles)
     global_max = max(profile.y_max for profile in selected_profiles)
+    max_half_span_km = max(profile.width_km for profile in selected_profiles) / 2.0
 
     if not math.isfinite(global_min) or not math.isfinite(global_max):
         raise RuntimeError("Could not build any city profiles from the selected data.")
@@ -741,10 +742,19 @@ def main() -> int:
         )
         add_shape_inset(profile_axis, profile)
 
-        width_axis.set_xlim(0.0, 1.0)
+        width_axis.set_xlim(-max_half_span_km, max_half_span_km)
         width_axis.set_ylim(0.0, 1.0)
         width_axis.set_facecolor("#f8fafc")
-        width_axis.set_xticks([])
+        width_axis.axvline(0.0, color="#94a3b8", linewidth=0.8, alpha=0.9)
+        width_axis.set_xticks([-max_half_span_km, 0.0, max_half_span_km])
+        width_axis.set_xticklabels(
+            [
+                f"{-max_half_span_km:.1f}",
+                "0",
+                f"{max_half_span_km:.1f}",
+            ],
+            fontsize=8,
+        )
         width_axis.set_yticks([])
         for spine in width_axis.spines.values():
             spine.set_alpha(0.35)
@@ -752,7 +762,7 @@ def main() -> int:
         if col_index == 0:
             profile_axis.set_ylabel("Altitude (m)")
         if row_index == rows - 1:
-            width_axis.set_xlabel("Projected city span")
+            width_axis.set_xlabel("Distance from center (km)")
         else:
             profile_axis.set_xticklabels([])
 

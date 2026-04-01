@@ -535,6 +535,17 @@ def city_title(profile: ProfileData) -> str:
     return f"{profile.city.tatort}\ncustom selection"
 
 
+def split_panel_axes(container_axis):
+    container_axis.set_xticks([])
+    container_axis.set_yticks([])
+    for spine in container_axis.spines.values():
+        spine.set_visible(False)
+
+    top_axis = container_axis.inset_axes([0.0, 0.14, 1.0, 0.86])
+    bottom_axis = container_axis.inset_axes([0.0, 0.0, 1.0, 0.10])
+    return top_axis, bottom_axis
+
+
 def list_cached_profiles(cache_root: Path, bins: int) -> list[ProfileData]:
     profiles_dir = profile_cache_root(cache_root)
     candidates = sorted(profiles_dir.glob("*.json"))
@@ -711,26 +722,39 @@ def main() -> int:
         profile = selected_profiles[index]
         row_index = index // columns
         col_index = index % columns
-        axis.fill_between(profile.x, profile.p10, profile.p90, color="#b9d9eb", alpha=0.9)
-        axis.plot(profile.x, profile.p50, color="#0f4c5c", linewidth=2.0)
-        axis.set_ylim(global_min, global_max)
-        axis.set_xlim(0.0, 1.0)
-        axis.grid(alpha=0.2, linewidth=0.5)
-        axis.set_title(city_title(profile), fontsize=10)
-        axis.text(
+        profile_axis, width_axis = split_panel_axes(axis)
+
+        profile_axis.fill_between(profile.x, profile.p10, profile.p90, color="#b9d9eb", alpha=0.9)
+        profile_axis.plot(profile.x, profile.p50, color="#0f4c5c", linewidth=2.0)
+        profile_axis.set_ylim(global_min, global_max)
+        profile_axis.set_xlim(0.0, 1.0)
+        profile_axis.grid(alpha=0.2, linewidth=0.5)
+        profile_axis.set_title(city_title(profile), fontsize=10)
+        profile_axis.text(
             0.02,
             0.04,
             f"{profile.width_km:.1f} km span",
-            transform=axis.transAxes,
+            transform=profile_axis.transAxes,
             fontsize=8,
             ha="left",
             va="bottom",
         )
-        add_shape_inset(axis, profile)
+        add_shape_inset(profile_axis, profile)
+
+        width_axis.set_xlim(0.0, 1.0)
+        width_axis.set_ylim(0.0, 1.0)
+        width_axis.set_facecolor("#f8fafc")
+        width_axis.set_xticks([])
+        width_axis.set_yticks([])
+        for spine in width_axis.spines.values():
+            spine.set_alpha(0.35)
+
         if col_index == 0:
-            axis.set_ylabel("Altitude (m)")
+            profile_axis.set_ylabel("Altitude (m)")
         if row_index == rows - 1:
-            axis.set_xlabel("Projected city span")
+            width_axis.set_xlabel("Projected city span")
+        else:
+            profile_axis.set_xticklabels([])
 
     plt.tight_layout(rect=(0, 0, 1, 0.80))
     plt.show()

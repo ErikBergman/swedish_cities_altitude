@@ -535,6 +535,14 @@ def city_title(profile: ProfileData) -> str:
     return f"{profile.city.tatort}\ncustom selection"
 
 
+def normalize_to_unit(values: np.ndarray, minimum: float, maximum: float, pad: float = 0.1) -> np.ndarray:
+    if maximum <= minimum:
+        return np.full_like(values, 0.5, dtype="float64")
+    normalized = (values - minimum) / (maximum - minimum)
+    usable = max(1.0 - (2 * pad), 0.0)
+    return (normalized * usable) + pad
+
+
 def split_panel_axes(container_axis):
     container_axis.set_xticks([])
     container_axis.set_yticks([])
@@ -746,6 +754,25 @@ def main() -> int:
         width_axis.set_ylim(0.0, 1.0)
         width_axis.set_facecolor("#f8fafc")
         width_axis.axvline(0.0, color="#94a3b8", linewidth=0.8, alpha=0.9)
+        miniature_x = (profile.x - 0.5) * profile.width_km
+        miniature_p10 = normalize_to_unit(profile.p10, global_min, global_max)
+        miniature_p50 = normalize_to_unit(profile.p50, global_min, global_max)
+        miniature_p90 = normalize_to_unit(profile.p90, global_min, global_max)
+        width_axis.fill_between(
+            miniature_x,
+            miniature_p10,
+            miniature_p90,
+            color="#cfe7f3",
+            alpha=0.8,
+            linewidth=0.0,
+        )
+        width_axis.plot(
+            miniature_x,
+            miniature_p50,
+            color="#0f4c5c",
+            linewidth=0.8,
+            solid_capstyle="round",
+        )
         width_axis.set_xticks([-max_half_span_km, 0.0, max_half_span_km])
         width_axis.set_xticklabels(
             [
